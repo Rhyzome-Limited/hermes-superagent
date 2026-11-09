@@ -31,6 +31,7 @@ _TICK_LOCK_FILENAME = "tick.lock"
 IGNORED_TRIGGER_RETENTION_SECONDS = 7 * 24 * 3600.0
 POLL_BUDGET_SHARE = 0.5
 SOURCE_TICKET = "sources"
+_SEND_PLACEHOLDER = re.compile(r"\{(channel|text)\}")
 
 
 @dataclass(frozen=True)
@@ -71,7 +72,9 @@ def argv_sender(argv: tuple[str, ...]) -> Sender | None:
         return None
 
     def send(channel: str, text: str) -> None:
-        rendered = [part.replace("{channel}", channel).replace("{text}", text) for part in argv]
+        # The one place every outbound text passes, so it is neutralised here whatever wrote the outbox row.
+        values = {"channel": channel, "text": chat_safe(text)}
+        rendered = [_SEND_PLACEHOLDER.sub(lambda match: values[match.group(1)], part) for part in argv]
         subprocess.run(rendered, check=True, timeout=_SEND_TIMEOUT_SECONDS, capture_output=True)
 
     return send
