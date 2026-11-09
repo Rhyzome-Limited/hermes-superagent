@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+from superagent import router
 from superagent.domain import Report, ReportState
 from superagent.router import _render_escalation, _render_report, chat_safe, strip_links
 
@@ -73,8 +74,32 @@ def test_links_are_removed(text: str, kept: str) -> None:
     assert line.endswith(kept)
 
 
-# A dot with a word character on both sides is what any auto-linker needs to see a host, in ASCII or IDNA stops.
-LINKABLE = re.compile(r"\w[.\u3002\uff0e\uff61]\w")
+DOTS = ".\u3002\uff0e\uff61"
+# IANA's IDN example host under the real ccTLD .bharat (xn--p1b6ci4b4b3a.xn--h2brj9c). Its vowel signs are
+# combining marks, which \w does not match.
+DEVANAGARI_HOST = "\u0909\u0926\u093e\u0939\u0930\u0923.\u092d\u093e\u0930\u0924"
+_HOST_LETTER = re.compile(r"[\w\xad-]")
+
+
+def in_host(char: str) -> bool:
+    """Telegram's rule for a character of a host name, written apart from the code under test: below U+00C0 a
+    letter, digit, "_" or "-" (or the soft hyphen IDNA drops), from U+00C0 up anything but a space or a dot."""
+    if char in DOTS:
+        return False
+    return bool(_HOST_LETTER.fullmatch(char)) or (ord(char) >= 0xC0 and not char.isspace())
+
+
+def linkable(text: str) -> bool:
+    """A dot with a host character on each side is what an auto-linker needs to see a host."""
+    return any(text[at] in DOTS and in_host(text[at - 1]) and in_host(text[at + 1]) for at in range(1, len(text) - 1))
+
+
+def test_the_host_class_follows_telegrams_rule_for_every_code_point() -> None:
+    expected = [in_host(chr(code)) for code in range(0x110000)]
+    for flags in (0, re.IGNORECASE):
+        host_char = re.compile(router._HOST_CHAR, flags)
+        wrong = [hex(code) for code in range(0x110000) if bool(host_char.fullmatch(chr(code))) != expected[code]]
+        assert wrong == []
 
 
 @pytest.mark.parametrize(
@@ -88,12 +113,21 @@ LINKABLE = re.compile(r"\w[.\u3002\uff0e\uff61]\w")
         "see x_attacker.com?d=1",
         "see attacker\uff0ecom/x",
         "see \u043f\u0440\u0438\u043c\u0435\u0440.\u0440\u0444/x",
+        f"see {DEVANAGARI_HOST}/x?d=LEAK",
+        "see \u0909\u0926\u093e\u0939\u0930\u0923.\u0915\u0949\u092e/x?d=LEAK",
+        "see \u0989\u09a6\u09be\u09b9\u09b0\u09a3.\u09ad\u09be\u09b0\u09a4/x?d=LEAK",
+        "see \u0909\u0926\u093e\u0939\u0930\u0923\u093e.com/x?d=LEAK",
+        "see attacker\u0301.com/x?d=LEAK",
+        "see attacker\u200d.com/x?d=LEAK",
+        "see attacker.co\u0301m/x?d=LEAK",
+        "see i\u2764.ws/x?d=LEAK",
+        "see attack\u00ader.com/x?d=LEAK",
     ],
 )
 def test_a_bare_host_with_a_path_query_or_fragment_is_removed(text: str) -> None:
     line = rendered(text)
     assert line.endswith(": see [link removed]")
-    assert not LINKABLE.search(line)
+    assert not linkable(line)
 
 
 @pytest.mark.parametrize(
@@ -107,12 +141,16 @@ def test_a_bare_host_with_a_path_query_or_fragment_is_removed(text: str) -> None
         ("see attacker\u3002com", "see attacker[.]com"),
         ("see xn--e1afmkfd.xn--p1ai", "see xn--e1afmkfd[.]xn--p1ai"),
         ("fixed router.py:356 and README.md", "fixed router[.]py:356 and README[.]md"),
+        (f"mail {DEVANAGARI_HOST}", "mail " + DEVANAGARI_HOST.replace(".", "[.]")),
+        ("see attackeŕ.com", "see attackeŕ[.]com"),
+        ("see attacker‌.com", "see attacker‌[.]com"),
+        ("see attacker.cóm", "see attacker[.]cóm"),
     ],
 )
 def test_any_other_host_keeps_its_name_but_cannot_become_a_link(text: str, kept: str) -> None:
     line = rendered(text)
     assert line.endswith(kept)
-    assert not LINKABLE.search(line)
+    assert not linkable(line)
 
 
 def test_versions_and_abbreviations_are_not_hosts() -> None:
@@ -153,7 +191,7 @@ def test_chat_safe_breaks_any_image_tag_and_stays_idempotent() -> None:
 
 @pytest.mark.parametrize(
     "unit",
-    ["ab.", "1.", "a+b-c.", "www.", "[a](", "![a](", "[", "<img", "[a]", "]("],
+    ["ab.", "1.", "a+b-c.", "www.", "[a](", "![a](", "[", "<img", "[a]", "](", "हरण.", "á.", "‍."],
 )
 def test_hostile_text_is_cleaned_in_linear_time(unit: str) -> None:
     # A worker writes the report, and the patterns run before any length cap: 100k characters must stay cheap.

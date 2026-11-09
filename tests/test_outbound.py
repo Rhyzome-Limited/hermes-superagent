@@ -101,6 +101,17 @@ def test_a_row_written_straight_into_the_outbox_carries_no_secret_and_no_link(tm
     assert not re.search(r"\w\.\w", delivered)
 
 
+def test_an_idn_host_with_a_query_is_removed_at_the_send(tmp_path: Path) -> None:
+    argv, sent = recorder(tmp_path)
+    send = argv_sender(argv)
+    assert send is not None
+    devanagari = "उदाहरण.भारत"
+    send("telegram:1", f"status: see {devanagari}/x?d=LEAK and attacker‍.com?d=LEAK")
+    delivered = json.loads(sent.read_text())[-1]
+    assert "LEAK" not in delivered
+    assert delivered.endswith("status: see [link removed] and [link removed]")
+
+
 def test_the_hermes_patterns_do_match_the_raw_text() -> None:
     assert HERMES_MEDIA_EXTENSIONLESS.search(HOSTILE[0]) is not None
     assert HERMES_IMAGE_TAG.search(HOSTILE[4]) is not None
