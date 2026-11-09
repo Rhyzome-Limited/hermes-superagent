@@ -9,6 +9,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
@@ -123,13 +124,83 @@ def _group_has_live_member(group: int) -> bool:
     return False
 
 
-def _group_exited_within(group: int, seconds: float) -> bool:
+@dataclass(frozen=True)
+class _Process:
+    pid: int
+    ppid: int
+    pgid: int
+    alive: bool
+    started: str
+
+
+def _process_table() -> dict[int, _Process]:
+    result = subprocess.run(
+        ["ps", "-A", "-o", "pid=,ppid=,pgid=,stat=,lstart="],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "LC_ALL": "C"},
+    )
+    if result.returncode != 0:
+        raise WorkerStopError(f"could not list processes: {result.stderr.strip()}")
+    table: dict[int, _Process] = {}
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) >= 5 and all(field.isdigit() for field in fields[:3]):
+            pid, ppid, pgid = (int(field) for field in fields[:3])
+            table[pid] = _Process(pid, ppid, pgid, "Z" not in fields[3], " ".join(fields[4:]))
+    return table
+
+
+def _process_tree(roots: Sequence[int], table: Mapping[int, _Process]) -> dict[int, str]:
+    """Live processes reachable from roots through child processes, in any session or group, and through the other
+    members of each one's process group. Maps pid to start time, so a reused pid is told apart later."""
+    children: dict[int, list[int]] = {}
+    members: dict[int, list[int]] = {}
+    for process in table.values():
+        children.setdefault(process.ppid, []).append(process.pid)
+        members.setdefault(process.pgid, []).append(process.pid)
+    spared = {os.getpid()}
+    ancestor = table.get(os.getpid())
+    while ancestor is not None and ancestor.pid > 1 and ancestor.ppid not in spared:
+        spared.add(ancestor.ppid)
+        ancestor = table.get(ancestor.ppid)
+    seen: set[int] = set()
+    pending = [pid for pid in roots if pid in table]
+    while pending:
+        pid = pending.pop()
+        if pid in seen or pid <= 1 or pid in spared:
+            continue
+        seen.add(pid)
+        pending.extend(children.get(pid, ()))
+        if table[pid].pgid not in (0, 1, os.getpgrp()):
+            pending.extend(members.get(table[pid].pgid, ()))
+    return {pid: table[pid].started for pid in seen if table[pid].alive}
+
+
+def _still_running(tree: Mapping[int, str], table: Mapping[int, _Process]) -> dict[int, str]:
+    return {
+        pid: started
+        for pid, started in tree.items()
+        if (process := table.get(pid)) is not None and process.alive and process.started == started
+    }
+
+
+def _signal_each(tree: Mapping[int, str], signum: int) -> None:
+    for pid in tree:
+        try:
+            os.kill(pid, signum)
+        except (ProcessLookupError, PermissionError):
+            continue  # gone already, or not ours to signal: the wait that follows reports any survivor
+
+
+def _tree_exited_within(group: int, tree: Mapping[int, str], seconds: float) -> bool:
     deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        if not _group_has_live_member(group):
-            return True
+    while True:
+        gone = not _group_has_live_member(group) and not (tree and _still_running(tree, _process_table()))
+        if gone or time.monotonic() >= deadline:
+            return gone
         time.sleep(_STOP_POLL_SECONDS)
-    return not _group_has_live_member(group)
 
 
 def is_same_process(pid: int, started_at: float) -> bool:
@@ -216,17 +287,27 @@ class SubprocessBackend:
                 raise WorkerStopError(f"process group {group} has no leader and is too old to identify")
         elif abs(leader_started_at - assignment.started_at) > _PID_START_TOLERANCE_SECONDS:
             return
+        # Collect the whole tree before any signal: once a parent dies its children are reparented and lost. Hermes
+        # starts each terminal command in a new session, and a command can start another one with setsid.
+        tree = _process_tree([group], _process_table())
+        self._signal_group(group, signal.SIGTERM)
+        _signal_each(tree, signal.SIGTERM)
+        if _tree_exited_within(group, tree, _STOP_GRACE_SECONDS):
+            return
+        table = _process_table()
+        tree = _process_tree([group, *_still_running(tree, table)], table)
+        self._signal_group(group, signal.SIGKILL)
+        _signal_each(tree, signal.SIGKILL)
+        if not _tree_exited_within(group, tree, _KILL_GRACE_SECONDS):
+            raise WorkerStopError(f"process group {group} or one of its descendants survived SIGKILL")
+
+    @staticmethod
+    def _signal_group(group: int, signum: int) -> None:
         try:
-            os.killpg(group, signal.SIGTERM)
-            if _group_exited_within(group, _STOP_GRACE_SECONDS):
-                return
-            os.killpg(group, signal.SIGKILL)
+            os.killpg(group, signum)
         except ProcessLookupError:
             return
         # macOS raises EPERM for a group holding only zombies, and any OS raises it for another user's processes.
         except PermissionError as error:
             if _group_has_live_member(group):
                 raise WorkerStopError(f"process group {group} is still running: {error}") from error
-            return
-        if not _group_exited_within(group, _KILL_GRACE_SECONDS):
-            raise WorkerStopError(f"process group {group} survived SIGKILL")

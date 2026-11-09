@@ -12,7 +12,14 @@ import pytest
 
 from superagent.domain import Assignment, AssignmentStatus, Mandate, Strength, Ticket, TicketStatus
 from superagent.reporting import identity_from_workdir
-from superagent.worker import IDENTITY_FILENAME, SubprocessBackend, WorkerStopError, write_identity
+from superagent.worker import (
+    IDENTITY_FILENAME,
+    SubprocessBackend,
+    WorkerStopError,
+    _Process,
+    _process_tree,
+    write_identity,
+)
 
 STUBBORN = (
     "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\nopen('ready', 'w').close()\ntime.sleep(60)\n"
@@ -138,6 +145,7 @@ def test_stop_refuses_when_it_cannot_read_a_live_process(tmp_path: Path, monkeyp
 def test_stop_reports_a_group_that_survives_sigkill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sent: list[int] = []
     monkeypatch.setattr("superagent.worker.os.killpg", lambda group, signum: sent.append(signum))
+    monkeypatch.setattr("superagent.worker._process_table", dict)
     monkeypatch.setattr("superagent.worker._group_has_live_member", lambda group: True)
     monkeypatch.setattr("superagent.worker._process_started_at", lambda pid: 1000.0)
     monkeypatch.setattr("superagent.worker._STOP_GRACE_SECONDS", 0.0)
@@ -232,3 +240,103 @@ def test_last_output_is_the_tail_of_the_worker_log_without_terminal_codes(tmp_pa
     assert "\x1b" not in output
     assert len(output) <= 4000
     assert SubprocessBackend(["worker"], tmp_path / "none").last_output(assignment()) == ""
+
+
+TREE = """
+import os, signal, subprocess, sys, time
+role, pid_file, stubborn = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+if role == "leader":
+    subprocess.Popen([sys.executable, __file__, "child", pid_file, sys.argv[3]])
+elif role == "child":
+    subprocess.Popen([sys.executable, __file__, "grandchild", pid_file, sys.argv[3]])
+else:
+    os.setsid()
+    if stubborn:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    with open(pid_file + ".tmp", "w") as out:
+        out.write(str(os.getpid()))
+    os.rename(pid_file + ".tmp", pid_file)
+time.sleep(60)
+"""
+
+
+def gone(pid: int, within: float = 5.0) -> bool:
+    deadline = time.time() + within
+    while True:
+        state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+        if not state or "Z" in state:
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def start_tree(tmp_path: Path, stubborn: bool) -> tuple[SubprocessBackend, Assignment, int]:
+    script = tmp_path / "tree.py"
+    script.write_text(TREE, encoding="utf-8")
+    pid_file = tmp_path / "grandchild.pid"
+    argv = [sys.executable, str(script), "leader", str(pid_file), "1" if stubborn else "0", "{brief}"]
+    backend = SubprocessBackend(argv, tmp_path / "w")
+    started = assignment()
+    pid = backend.start(ticket(), started, "token")
+    deadline = time.time() + 10
+    while not pid_file.exists() and time.time() < deadline:
+        time.sleep(0.05)
+    grandchild = int(pid_file.read_text())
+    assert os.getsid(grandchild) != os.getsid(pid)
+    assert os.getpgid(grandchild) != os.getpgid(pid)
+    return backend, Assignment(started.id, started.ticket_id, 1, started.status, pid, started.started_at), grandchild
+
+
+def test_stop_kills_a_grandchild_that_left_the_session_with_setsid(tmp_path: Path) -> None:
+    backend, running, grandchild = start_tree(tmp_path, stubborn=False)
+    try:
+        backend.stop(running)
+        assert gone(running.pid or 0)
+        assert gone(grandchild)
+    finally:
+        if not gone(grandchild, within=0):
+            os.kill(grandchild, 9)
+
+
+def test_stop_kills_a_setsid_grandchild_that_ignores_sigterm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("superagent.worker._STOP_GRACE_SECONDS", 0.5)
+    backend, running, grandchild = start_tree(tmp_path, stubborn=True)
+    try:
+        backend.stop(running)
+        assert gone(grandchild)
+    finally:
+        if not gone(grandchild, within=0):
+            os.kill(grandchild, 9)
+
+
+def test_stop_leaves_unrelated_processes_alone(tmp_path: Path) -> None:
+    bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    try:
+        backend, running, grandchild = start_tree(tmp_path, stubborn=False)
+        backend.stop(running)
+        assert gone(grandchild)
+        assert bystander.poll() is None
+    finally:
+        bystander.kill()
+        bystander.wait()
+
+
+def test_the_tree_follows_children_and_group_mates_and_spares_the_caller() -> None:
+    me, parent = os.getpid(), os.getppid()
+    table = {
+        parent: _Process(parent, 1, parent, True, "p"),
+        me: _Process(me, parent, os.getpgrp(), True, "me"),
+        100: _Process(100, 1, 100, True, "leader"),
+        101: _Process(101, 100, 101, True, "terminal command in a new session"),
+        102: _Process(102, 101, 102, True, "grandchild after setsid"),
+        103: _Process(103, 1, 101, True, "orphan left in the command's group"),
+        104: _Process(104, 100, 100, False, "zombie"),
+        105: _Process(105, 100, os.getpgrp(), True, "child sharing the caller's group"),
+        200: _Process(200, 1, 200, True, "unrelated"),
+        201: _Process(201, 105, os.getpgrp(), True, "grandchild in the caller's group"),
+    }
+    tree = _process_tree([100], table)
+    assert set(tree) == {100, 101, 102, 103, 105, 201}
+    assert tree[102] == "grandchild after setsid"
+    assert _process_tree([me], table) == {}
