@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from collections import Counter
 
+from .agents import redact
 from .domain import Admission, DigestItem, ReportState, TicketStatus
-from .router import chat_safe, shorten, task_label
+from .router import chat_safe, shorten, strip_links, task_label
 from .store import Store
 
 ITEMS_PER_SECTION = 5
@@ -50,7 +51,8 @@ def build_digest(store: Store, since: float, hours: float) -> str:
         lines.append(f"Undelivered messages: {undelivered}")
     if len(lines) == 1:
         lines.append("Nothing happened.")
-    return chat_safe("\n".join(lines))
+    # Results, questions, escalation reasons and recorded goals are worker or event text: no secret, no link.
+    return chat_safe(strip_links(redact("\n".join(lines))))
 
 
 def _waiting_item(store: Store, ticket_id: str, goal: str) -> DigestItem:
