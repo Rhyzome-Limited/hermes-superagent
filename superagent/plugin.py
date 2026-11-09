@@ -306,6 +306,8 @@ class Plugin:
         return json.dumps({"digest": text, "sent": bool(args.get("send"))})
 
     def status_tool(self, args: Mapping[str, Any], **kwargs: Any) -> str:
+        if self.role not in (ROLE_ROUTER, ROLE_WATCHDOG):
+            return _error("superagent_status only works in the router or the watchdog")
         try:
             runtime = self.runtime()
             tickets = [_framed_status(line) for line in runtime.router.status()]
@@ -315,6 +317,8 @@ class Plugin:
             return _error(f"status failed: {error}")
 
     def report_tool(self, args: Mapping[str, Any], **kwargs: Any) -> str:
+        if self.role != ROLE_WORKER:
+            return _error("superagent_report only works in the worker")
         try:
             state = ReportState(str(args.get("state", "")))
             result = submit_report(

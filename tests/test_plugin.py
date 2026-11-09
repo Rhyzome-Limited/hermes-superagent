@@ -460,9 +460,26 @@ def test_dispatch_tool_only_works_in_the_router(tmp_path: Path) -> None:
 
 
 def test_report_tool_outside_a_worker_fails_visibly(tmp_path: Path) -> None:
-    ctx = registered("", tmp_path)
+    ctx = registered("worker", tmp_path)
     answer = json.loads(ctx.tools["superagent_report"]["handler"]({"state": "ready", "summary": "x"}))
     assert "not a superagent worker directory" in answer["error"]
+
+
+@pytest.mark.parametrize("role", ["", "router", "watchdog"])
+def test_report_tool_refuses_a_session_without_the_worker_role_even_in_a_worker_directory(
+    worker_ctx: tuple[FakeContext, Store, str], role: str
+) -> None:
+    ctx, store, assignment_id = worker_ctx
+    ctx.settings["role"] = role
+    answer = json.loads(ctx.tools["superagent_report"]["handler"]({"state": "ready", "summary": "x"}))
+    assert "only works in the worker" in answer["error"]
+    assert store.reports_for(assignment_id) == []
+
+
+@pytest.mark.parametrize("role", ["", "worker"])
+def test_status_tool_refuses_other_roles(tmp_path: Path, role: str) -> None:
+    answer = json.loads(registered(role, tmp_path).tools["superagent_status"]["handler"]({}))
+    assert "only works in the router or the watchdog" in answer["error"]
 
 
 def report_of(summary: str) -> Report:
