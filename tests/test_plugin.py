@@ -161,8 +161,22 @@ def test_router_cannot_execute(tmp_path: Path, tool: str) -> None:
 
 def test_router_keeps_its_own_tools(tmp_path: Path) -> None:
     ctx = registered("router", tmp_path)
-    assert ctx.hooks["pre_tool_call"](tool_name="superagent_dispatch", args={}, task_id="t") is None
-    assert ctx.hooks["pre_tool_call"](tool_name="memory", args={}, task_id="t") is None
+    for tool in ("superagent_dispatch", "superagent_status", "wiki_find", "wiki_read", "skill_view", "clarify"):
+        assert ctx.hooks["pre_tool_call"](tool_name=tool, args={}, task_id="t") is None, tool
+
+
+@pytest.mark.parametrize("tool", ["memory", "session_search"])
+def test_router_cannot_persist_or_recall_other_sessions(tmp_path: Path, tool: str) -> None:
+    pre_tool_call = registered("router", tmp_path).hooks["pre_tool_call"]
+    assert pre_tool_call(tool_name=tool, args={}, task_id="t")["action"] == "block"
+    bridged = {"calls": [{"name": "wiki_find"}, {"name": tool}]}
+    assert pre_tool_call(tool_name="tool_call", args=bridged, task_id="t")["action"] == "block"
+
+
+def test_router_reaches_the_wiki_through_the_bridge(tmp_path: Path) -> None:
+    pre_tool_call = registered("router", tmp_path).hooks["pre_tool_call"]
+    bridged = {"calls": [{"name": "wiki_find", "arguments": {"query": "809d"}}, {"name": "wiki_read"}]}
+    assert pre_tool_call(tool_name="tool_call", args=bridged, task_id="t") is None
 
 
 def use_terminal_backend(monkeypatch: pytest.MonkeyPatch, backend: str) -> None:

@@ -377,7 +377,7 @@ Settings go under `plugins.entries.hermes-superagent.settings` in each profile's
 | `superagent_digest` | Watchdog summarises recent work, waiting questions and what record-mode rules would have started |
 | `pre_gateway_dispatch` | Runs the gate before Hermes handles a message, fails closed |
 | `pre_llm_call` | Hands the router's model the admitted trigger ids |
-| `pre_tool_call` | Enforces each role's tool policy |
+| `pre_tool_call` | Enforces each role's tool policy. The router may call only its four `superagent_*` tools, `skills_list`, `skill_view`, `clarify`, the read-only wiki tools `wiki_find` and `wiki_read`, and the tool-search bridges. It has no `memory` or `session_search`, so injected text can't persist into later sessions or pull from earlier ones |
 | `post_tool_call` | Records worker activity for the watchdog |
 
 `hermes superagent ledger list`, `show`, `close`, `ignore` and `snooze` work on the item ledger, which keeps every item a source shows until someone closes it with a reason. Connectors fill it, see `[connectors]` above and the [dogfood design](docs/dogfood-design.md).
