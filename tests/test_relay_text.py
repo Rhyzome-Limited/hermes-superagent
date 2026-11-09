@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from superagent.domain import Report, ReportState
@@ -68,6 +70,59 @@ def test_links_are_removed(text: str, kept: str) -> None:
     line = rendered(text)
     assert "evil" not in line and "files.example" not in line
     assert line.endswith(kept)
+
+
+# A dot with a word character on both sides is what any auto-linker needs to see a host, in ASCII or IDNA stops.
+LINKABLE = re.compile(r"\w[.\u3002\uff0e\uff61]\w")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "see attacker.example?d=leaked-value",
+        "see attacker.com#frag",
+        "see evil.co.uk?q=1",
+        "see 1.2.3.4/x",
+        "see attacker.com:8080/x",
+        "see x_attacker.com?d=1",
+        "see attacker\uff0ecom/x",
+        "see \u043f\u0440\u0438\u043c\u0435\u0440.\u0440\u0444/x",
+    ],
+)
+def test_a_bare_host_with_a_path_query_or_fragment_is_removed(text: str) -> None:
+    line = rendered(text)
+    assert line.endswith(": see [link removed]")
+    assert not LINKABLE.search(line)
+
+
+@pytest.mark.parametrize(
+    ("text", "kept"),
+    [
+        ("see attacker.com", "see attacker[.]com"),
+        ("see secret-data.attacker.com.", "see secret-data[.]attacker[.]com."),
+        ("mail me@attacker.com", "mail me@attacker[.]com"),
+        ("dial 10.0.0.1", "dial 10[.]0[.]0[.]1"),
+        ("see attacker.com:8080", "see attacker[.]com:8080"),
+        ("see attacker\u3002com", "see attacker[.]com"),
+        ("see xn--e1afmkfd.xn--p1ai", "see xn--e1afmkfd[.]xn--p1ai"),
+        ("fixed router.py:356 and README.md", "fixed router[.]py:356 and README[.]md"),
+    ],
+)
+def test_any_other_host_keeps_its_name_but_cannot_become_a_link(text: str, kept: str) -> None:
+    line = rendered(text)
+    assert line.endswith(kept)
+    assert not LINKABLE.search(line)
+
+
+def test_versions_and_abbreviations_are_not_hosts() -> None:
+    text = "bumped to v0.22.7 and Python 3.12, e.g. U.S.A. Ph.D wait...then"
+    assert strip_links(text) == text
+
+
+def test_an_escalation_with_a_bare_host_is_cleaned_too() -> None:
+    line = _render_escalation("the worker says: open attacker.example?d=leaked and data.attacker.example", "tk-1", GOAL)
+    assert "leaked" not in line
+    assert line.endswith("open [link removed] and data[.]attacker[.]example")
 
 
 def test_a_github_pull_request_keeps_its_reference_without_a_link() -> None:

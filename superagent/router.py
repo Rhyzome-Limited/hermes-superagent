@@ -45,7 +45,13 @@ _MARKDOWN_LINK = re.compile(r"\[([^\]\n]*)\]\([^)\n]*\)")
 _GITHUB_ITEM = re.compile(
     r"(?:https?://)?(?:www\.)?github\.com/([\w.-]+/[\w.-]+)/(?:pull|issues)/(\d+)(?:[/#?][^\s)\]]*)?", re.IGNORECASE
 )
-_URL = re.compile(r"(?:\b[a-z][a-z0-9+.-]*://|\bwww\.)\S+|\b(?:[a-z0-9-]+\.)+[a-z]{2,}/\S*", re.IGNORECASE)
+# A full stop, or one of the stops IDNA also reads as a dot.
+_DOT = r"[.\u3002\uff0e\uff61]"
+# A host as chat apps auto-link it without a scheme: attacker.example, a.b.co.uk, README.md, 10.0.0.1.
+_HOST = rf"(?<![\w-])(?:(?:[\w-]+{_DOT})+[^\W\d_][\w-]+|\d{{1,3}}(?:{_DOT}\d{{1,3}}){{3}})(?![\w-])"
+_URL = re.compile(rf"(?:\b[a-z][a-z0-9+.-]*://|\bwww\.)\S+|{_HOST}(?::\d+)?[/?#]\S*", re.IGNORECASE)
+_BARE_HOST = re.compile(_HOST)
+_HOST_DOT = re.compile(_DOT)
 # A Kastle repo named on its own or as owner/name: a hyphen continues a repo name, so kastle-push is another repo.
 _KASTLE_REPO = re.compile(r"(?<![\w-])kastle(?:-mobile)?(?![\w-])", re.IGNORECASE)
 _KASTLE_TICKET = re.compile(r"(?<![\w-])CMPY-\d+(?!\w)", re.IGNORECASE)
@@ -333,10 +339,13 @@ def chat_safe(text: str) -> str:
 
 
 def strip_links(text: str) -> str:
-    """Worker text reaches chat with no image and no clickable link. A GitHub pull request or issue keeps its
-    reference as owner/repo#N, and every other URL is removed."""
+    """Worker text reaches chat with no image and nothing a chat app turns into a link, since a link preview fetches
+    it. A GitHub pull request or issue keeps its reference as owner/repo#N. Every other URL is removed, and so is a
+    bare host followed by a path, query or fragment. Any other host keeps its name with each dot written as [.], so
+    a file name still reads as one: README[.]md, router[.]py:12."""
     text = _MARKDOWN_LINK.sub(r"\1", _IMAGE_TAG.sub("", text))
-    return _URL.sub("[link removed]", _GITHUB_ITEM.sub(r"\1#\2", text))
+    text = _URL.sub("[link removed]", _GITHUB_ITEM.sub(r"\1#\2", text))
+    return _BARE_HOST.sub(lambda match: _HOST_DOT.sub("[.]", match.group(0)), text)
 
 
 def shorten(text: str, limit: int = CHAT_WORD_LIMIT) -> str:
