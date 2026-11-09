@@ -78,7 +78,7 @@ def test_links_are_removed(text: str, kept: str) -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        "see éhttp://3232235777/?d=LEAK",
+        "see \u00e9http://3232235777/?d=LEAK",
         "see x_http://[2001:db8::1]/?d=LEAK",
         "see 1https://localhost:8080/?d=LEAK",
         "see x_tg://resolve?domain=LEAK",
@@ -121,7 +121,7 @@ def test_every_character_that_folds_to_a_stop_is_a_dot() -> None:
     assert folds == DOTS
     dot = re.compile(router._DOT)
     assert [hex(code) for code in range(0x110000) if bool(dot.fullmatch(chr(code))) != (chr(code) in DOTS)] == []
-    assert "evil﹒com".encode("idna") == b"evil.com"
+    assert "evil\ufe52com".encode("idna") == b"evil.com"
 
 
 def test_the_host_class_follows_telegrams_rule_for_every_code_point() -> None:
@@ -176,11 +176,11 @@ def test_a_bare_host_with_a_path_query_or_fragment_is_removed(text: str) -> None
         ("see xn--e1afmkfd.xn--p1ai", "see xn--e1afmkfd[.]xn--p1ai"),
         ("fixed router.py:356 and README.md", "fixed router[.]py:356 and README[.]md"),
         (f"mail {DEVANAGARI_HOST}", "mail " + DEVANAGARI_HOST.replace(".", "[.]")),
-        ("see attackeŕ.com", "see attackeŕ[.]com"),
-        ("see attacker‌.com", "see attacker‌[.]com"),
-        ("see attacker.cóm", "see attacker[.]cóm"),
-        ("see evil﹒com", "see evil[.]com"),
-        ("see evil⒈com", "see evil[.]com"),
+        ("see attacker\u0301.com", "see attacker\u0301[.]com"),
+        ("see attacker\u200c.com", "see attacker\u200c[.]com"),
+        ("see attacker.co\u0301m", "see attacker[.]co\u0301m"),
+        ("see evil\ufe52com", "see evil[.]com"),
+        ("see evil\u2488com", "see evil[.]com"),
     ],
 )
 def test_any_other_host_keeps_its_name_but_cannot_become_a_link(text: str, kept: str) -> None:
