@@ -253,6 +253,11 @@ else:
     os.setsid()
     if stubborn:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    else:
+        def on_term(signum, frame):
+            open(pid_file + ".term", "w").close()
+            sys.exit(0)
+        signal.signal(signal.SIGTERM, on_term)
     with open(pid_file + ".tmp", "w") as out:
         out.write(str(os.getpid()))
     os.rename(pid_file + ".tmp", pid_file)
@@ -294,6 +299,7 @@ def test_stop_kills_a_grandchild_that_left_the_session_with_setsid(tmp_path: Pat
         backend.stop(running)
         assert gone(running.pid or 0)
         assert gone(grandchild)
+        assert (tmp_path / "grandchild.pid.term").exists(), "the grandchild got SIGKILL without a SIGTERM first"
     finally:
         if not gone(grandchild, within=0):
             os.kill(grandchild, 9)
