@@ -14,7 +14,7 @@ from .cli import run, setup_parser
 from .config import load_config
 from .digest import DigestError, build_digest, send_digest
 from .domain import Loop, ReportState, ScopeClass, Trigger
-from .framing import frame_trigger
+from .framing import frame_trigger, frame_untrusted
 from .guard import (
     TOOL_CANCEL,
     TOOL_DIGEST,
@@ -314,7 +314,8 @@ class Plugin:
     def status_tool(self, args: Mapping[str, Any], **kwargs: Any) -> str:
         try:
             runtime = self.runtime()
-            return json.dumps({"tickets": runtime.router.status(), "undelivered": runtime.store.undelivered_count()})
+            tickets = [_framed_status(line) for line in runtime.router.status()]
+            return json.dumps({"tickets": tickets, "undelivered": runtime.store.undelivered_count()})
         except Exception as error:
             logger.exception("status failed")
             return _error(f"status failed: {error}")
@@ -468,6 +469,15 @@ def _message_text(message: object) -> str:
         parts = [part.get("text", "") for part in message if isinstance(part, dict)]
         return "\n".join(str(part) for part in parts)
     return ""
+
+
+def _framed_status(line: Mapping[str, str]) -> dict[str, str]:
+    """Goals can be raw event text and questions are worker-written: both reach the model as framed data."""
+    framed = dict(line)
+    framed["goal"] = frame_untrusted(f"goal of {line['ticket']}", line["goal"])
+    if line["question"]:
+        framed["question"] = frame_untrusted(f"question from the worker on {line['ticket']}", line["question"])
+    return framed
 
 
 def _error(message: str) -> str:
