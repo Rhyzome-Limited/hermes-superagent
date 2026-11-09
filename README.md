@@ -363,7 +363,7 @@ Settings go under `plugins.entries.hermes-superagent.settings` in each profile's
 
 | Setting | Values |
 | --- | --- |
-| `role` | `router`, `worker`, `watchdog` or empty. Empty keeps the plugin inert |
+| `role` | `router`, `worker`, `watchdog` or empty. Empty keeps the plugin inert. Only this setting gives a role: a session in a worker directory is not made a worker, so set `role: worker` in the worker profile |
 | `home` | Directory shared by all three profiles, holding `superagent.toml` and the database |
 
 | Tool or hook | Used for |

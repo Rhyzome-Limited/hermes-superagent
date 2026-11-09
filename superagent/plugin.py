@@ -30,7 +30,7 @@ from .reporting import NotAWorkerError, WorkerIdentity, identity_from_workdir, r
 from .router import NotAdmittedError, Outcome
 from .runtime import Runtime, open_runtime, tick
 from .store import StaleAssignmentError, Store
-from .worker import IDENTITY_FILENAME, ROLE_ROUTER, ROLE_WATCHDOG, ROLE_WORKER, WorkerStopError
+from .worker import ROLE_ROUTER, ROLE_WATCHDOG, ROLE_WORKER, WorkerStopError
 
 logger = logging.getLogger(__name__)
 
@@ -150,14 +150,8 @@ class Plugin:
 
     @property
     def role(self) -> str:
-        configured = str(self.ctx.get_config("role", default="") or "")
-        if configured or not self._session_is_in_a_worker_directory():
-            return configured
-        return ROLE_WORKER
-
-    def _session_is_in_a_worker_directory(self) -> bool:
-        cwd = self.ctx.session_cwd()
-        return bool(cwd) and (Path(cwd) / IDENTITY_FILENAME).is_file()
+        """Only the profile's own setting gives a role. A worker directory never turns a session into a worker."""
+        return str(self.ctx.get_config("role", default="") or "")
 
     def home(self) -> Path:
         configured = self.ctx.get_config("home", default="")

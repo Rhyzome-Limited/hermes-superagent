@@ -318,16 +318,18 @@ def test_worker_reports_through_the_bridge(worker_ctx: tuple[FakeContext, Store,
     assert decision is None
 
 
-def test_worker_directory_is_guarded_even_with_no_role_configured(
-    worker_ctx: tuple[FakeContext, Store, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_a_worker_directory_never_gives_a_role(
+    worker_ctx: tuple[FakeContext, Store, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ctx = worker_ctx[0]
+    ctx, store, assignment_id = worker_ctx
     ctx.settings["role"] = ""
     use_terminal_backend(monkeypatch, "local")
-    assert ctx.hooks["pre_tool_call"](tool_name="send_message", args={}, task_id="t")["action"] == "block"
-    assert ctx.hooks["pre_tool_call"](tool_name="terminal", args={}, task_id="t")["action"] == "block"
-    ctx.cwd = str(tmp_path)
     assert ctx.hooks["pre_tool_call"](tool_name="terminal", args={}, task_id="t") is None
+    assert ctx.hooks["pre_tool_call"](tool_name="send_message", args={}, task_id="t") is None
+    assert not ctx.tools["superagent_report"]["check_fn"]()
+    assert ctx.sections["superagent.role"]({}) == ""
+    ctx.hooks["post_tool_call"](tool_name="terminal", args={"command": "ls"}, result="ok", task_id="t")
+    assert store.recent_activity(assignment_id, 5) == []
 
 
 def test_configured_router_keeps_its_allowlist_inside_a_worker_directory(
