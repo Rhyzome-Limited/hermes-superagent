@@ -370,7 +370,7 @@ Settings go under `plugins.entries.hermes-superagent.settings` in each profile's
 | `superagent_forward` | Router passes a follow-up to a running or parked ticket, resuming it |
 | `superagent_cancel` | Router stops a ticket when the person who asked says so, and tells them |
 | `superagent_status` | Router lists live tickets |
-| `superagent_report` | Worker reports progress, blocked, ready, failed or dropped |
+| `superagent_report` | Worker reports progress, blocked, ready, failed or dropped. Optional `scope_class` (`in-scope` or `leo-gated`) records a `kastle-build-loop` ticket's scope triage in `tickets.scope_class`; any other loop refuses it. Once `leo-gated`, a later `in-scope` refuses the report. `superagent report --scope-class` does the same from outside Hermes |
 | `superagent_tick` | Watchdog assesses candidates, checks workers and relays |
 | `superagent_digest` | Watchdog summarises recent work, waiting questions and what record-mode rules would have started |
 | `pre_gateway_dispatch` | Runs the gate before Hermes handles a message, fails closed |

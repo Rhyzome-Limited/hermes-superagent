@@ -136,7 +136,8 @@ def test_a_database_from_before_loops_is_upgraded(tmp_path: Path) -> None:
     old = store.get_ticket("tk-old")
     assert (old.loop, old.repo) == ("", "")
     columns = {row[1] for row in sqlite3.connect(path).execute("PRAGMA table_info(tickets)")}
-    assert {"loop", "repo"} <= columns
+    assert {"loop", "repo", "scope_class"} <= columns
+    assert old.scope_class == ""
     assert Store(path).get_ticket("tk-old").goal == "g"
 
 

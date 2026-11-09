@@ -16,10 +16,12 @@ from .domain import (
     Assignment,
     AssignmentStatus,
     DigestItem,
+    Loop,
     Mandate,
     RepairAction,
     Report,
     ReportState,
+    ScopeClass,
     Strength,
     Ticket,
     TicketStatus,
@@ -92,6 +94,7 @@ _MIGRATIONS = (
     "UPDATE outbox SET failed_at = NULL WHERE sent_at IS NULL AND failed_at IS NOT NULL AND drop_reason IS NULL",
     "ALTER TABLE tickets ADD COLUMN loop TEXT",
     "ALTER TABLE tickets ADD COLUMN repo TEXT",
+    "ALTER TABLE tickets ADD COLUMN scope_class TEXT",
 )
 SEND_RETRY_BASE_SECONDS = 60.0
 SEND_RETRY_CAP_SECONDS = 1800.0
@@ -378,7 +381,13 @@ class Store:
         return [_assignment_from_row(row) for row in rows]
 
     def add_report(
-        self, assignment_id: str, token: str, state: ReportState, summary: str, question: str = ""
+        self,
+        assignment_id: str,
+        token: str,
+        state: ReportState,
+        summary: str,
+        question: str = "",
+        scope_class: str = "",
     ) -> Report:
         now = time.time()
         with self._connect() as connection:
@@ -387,6 +396,8 @@ class Store:
                 raise StaleAssignmentError(f"bad credentials for assignment {assignment_id}")
             if row["status"] != AssignmentStatus.RUNNING.value:
                 raise StaleAssignmentError(f"assignment {assignment_id} has ended, report refused")
+            if scope_class:
+                _set_scope_class(connection, row["ticket_id"], scope_class)
             summary = summary[:MAX_REPORT_CHARS]
             question = question[:MAX_REPORT_CHARS]
             connection.execute(
@@ -779,6 +790,25 @@ def _insert_assignment(connection: sqlite3.Connection, ticket_id: str) -> tuple[
     return Assignment(assignment_id, ticket_id, attempt, AssignmentStatus.RUNNING, None, now), token
 
 
+def _set_scope_class(connection: sqlite3.Connection, ticket_id: str, scope_class: str) -> None:
+    """Record a kastle-build-loop ticket's scope class. Once leo-gated it stays leo-gated: a later in-scope
+    refuses the whole report, so a worker can never talk itself into the merge carve-out."""
+    try:
+        wanted = ScopeClass(scope_class)
+    except ValueError as error:
+        choices = " or ".join(item.value for item in ScopeClass)
+        raise ValueError(f"scope_class must be {choices}, got {scope_class!r}") from error
+    ticket = connection.execute("SELECT loop, scope_class FROM tickets WHERE id = ?", (ticket_id,)).fetchone()
+    if ticket is None or ticket["loop"] != Loop.KASTLE_BUILD.value:
+        raise ValueError(f"scope_class is only accepted on {Loop.KASTLE_BUILD.value} tickets, report refused")
+    if ticket["scope_class"] == ScopeClass.LEO_GATED.value and wanted is not ScopeClass.LEO_GATED:
+        raise ValueError("this ticket is leo-gated and that never changes, report refused")
+    connection.execute(
+        "UPDATE tickets SET scope_class = ? WHERE id = ? AND (scope_class IS NULL OR scope_class != ?)",
+        (wanted.value, ticket_id, ScopeClass.LEO_GATED.value),
+    )
+
+
 def _trigger_from_row(row: sqlite3.Row) -> Trigger:
     return Trigger(
         id=row["id"],
@@ -810,6 +840,7 @@ def _ticket_from_row(row: sqlite3.Row) -> Ticket:
         TicketStatus(row["status"]),
         row["loop"] or "",
         row["repo"] or "",
+        row["scope_class"] or "",
     )
 
 

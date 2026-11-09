@@ -43,6 +43,11 @@ class Loop(StrEnum):
 DEFAULT_LOOP = Loop.CLAUDE_ASSISTED
 
 
+class ScopeClass(StrEnum):
+    IN_SCOPE = "in-scope"
+    LEO_GATED = "leo-gated"
+
+
 class AssignmentStatus(StrEnum):
     RUNNING = "running"
     ENDED = "ended"
@@ -93,6 +98,7 @@ class Ticket:
     status: TicketStatus
     loop: str = ""
     repo: str = ""
+    scope_class: str = ""
 
 
 @dataclass(frozen=True)

@@ -36,14 +36,19 @@ def identity_from_workdir(workdir: Path) -> WorkerIdentity:
     return WorkerIdentity(assignment_id, token, ticket_id, workdir.parents[2] / DB_FILENAME, int(attempt))
 
 
-def submit_report(identity: WorkerIdentity, state: ReportState, summary: str, question: str = "") -> dict[str, object]:
+def submit_report(
+    identity: WorkerIdentity, state: ReportState, summary: str, question: str = "", scope_class: str = ""
+) -> dict[str, object]:
     store = Store(identity.db_path)
-    store.add_report(identity.assignment_id, identity.token, state, summary, question)
+    store.add_report(identity.assignment_id, identity.token, state, summary, question, scope_class)
     inputs = [
         {"from": label, "from_allowed_person": trusted, "content": text}
         for label, text, trusted in store.take_inputs(identity.ticket_id)
     ]
-    return {"reported": state.value, "inputs": inputs}
+    result: dict[str, object] = {"reported": state.value, "inputs": inputs}
+    if scope_class:
+        result["scope_class"] = store.get_ticket(identity.ticket_id).scope_class
+    return result
 
 
 def record_tool_activity(identity: WorkerIdentity, tool_name: str, args: object, result: object) -> None:

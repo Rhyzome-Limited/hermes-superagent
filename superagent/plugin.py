@@ -11,7 +11,7 @@ from typing import Any
 from .cli import run, setup_parser
 from .config import load_config
 from .digest import DigestError, build_digest, send_digest
-from .domain import Loop, ReportState, Trigger
+from .domain import Loop, ReportState, ScopeClass, Trigger
 from .framing import frame_trigger
 from .guard import (
     TOOL_CANCEL,
@@ -123,6 +123,11 @@ REPORT_SCHEMA = {
             "state": {"type": "string", "enum": [state.value for state in ReportState]},
             "summary": {"type": "string", "description": "One or two factual sentences."},
             "question": {"type": "string", "description": "With blocked: the one decision a person must make."},
+            "scope_class": {
+                "type": "string",
+                "enum": [item.value for item in ScopeClass],
+                "description": "kastle-build-loop only: the Phase 0 scope triage. Once leo-gated, it never changes.",
+            },
         },
         "required": ["state", "summary"],
     },
@@ -306,7 +311,11 @@ class Plugin:
         try:
             state = ReportState(str(args.get("state", "")))
             result = submit_report(
-                self.worker_identity(), state, str(args.get("summary", "")), str(args.get("question", ""))
+                self.worker_identity(),
+                state,
+                str(args.get("summary", "")),
+                str(args.get("question", "")),
+                str(args.get("scope_class") or ""),
             )
         except StaleAssignmentError as error:
             return _error(f"{error}. This assignment has been replaced: stop working now.")
