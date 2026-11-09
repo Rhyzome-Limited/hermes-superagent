@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import html
 import json
 import logging
 import os
@@ -74,8 +75,9 @@ def argv_sender(argv: tuple[str, ...]) -> Sender | None:
 
     def send(channel: str, text: str) -> None:
         # The one place every outbound text passes, so it is neutralised here whatever wrote the outbox row: no
-        # secret, nothing a chat app turns into a link or an attachment.
-        values = {"channel": channel, "text": chat_safe(strip_links(redact(text)))}
+        # secret, nothing a chat app turns into a link or an attachment. `hermes send` sends any text with a tag as
+        # Telegram HTML, where <a href> hides a link and &#46; is a dot, so &, < and > are escaped last (A7).
+        values = {"channel": channel, "text": html.escape(chat_safe(strip_links(redact(text))), quote=False)}
         rendered = [_SEND_PLACEHOLDER.sub(lambda match: values[match.group(1)], part) for part in argv]
         subprocess.run(rendered, check=True, timeout=_SEND_TIMEOUT_SECONDS, capture_output=True)
 

