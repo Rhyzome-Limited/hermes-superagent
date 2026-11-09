@@ -115,6 +115,20 @@ def test_a_cli_platform_turn_with_a_sender_is_not_a_cli_turn(tmp_path: Path) -> 
     assert store_of(tmp_path).get_trigger("cli:20261109_101500_ab12:1") is None
 
 
+def test_a_cli_turn_a_gateway_serves_for_this_uid_is_taken(tmp_path: Path) -> None:
+    ctx = context(tmp_path, cli_config([ME]))
+    offered = cli_turn(ctx, "please start", sender_id=f"uid:{os.getuid()}")
+    assert "trigger_id=cli:20261109_101500_ab12:1" in offered["context"]
+    trigger = store_of(tmp_path).get_trigger("cli:20261109_101500_ab12:1")
+    assert trigger is not None and (trigger.source, trigger.actor) == ("cli", ME)
+
+
+def test_a_cli_turn_a_gateway_serves_for_another_uid_is_not_taken(tmp_path: Path) -> None:
+    ctx = context(tmp_path, cli_config([ME]))
+    assert cli_turn(ctx, "please start", sender_id=f"uid:{os.getuid() + 1}") is None
+    assert store_of(tmp_path).get_trigger("cli:20261109_101500_ab12:1") is None
+
+
 @pytest.mark.parametrize("platform", ["tui", "desktop"])
 def test_other_local_surfaces_are_not_taken(tmp_path: Path, platform: str) -> None:
     ctx = context(tmp_path, cli_config([ME]))

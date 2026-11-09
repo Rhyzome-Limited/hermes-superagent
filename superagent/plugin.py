@@ -229,7 +229,9 @@ class Plugin:
         text = _message_text(user_message)
         runtime = self.runtime()
         if platform == CLI_SOURCE:
-            if sender:
+            # A classic in-process turn has no sender. A local turn that a Hermes 0.22.7 gateway serves carries
+            # uid:<n>, which the gateway takes from the control socket's peer credentials, never from the text.
+            if sender and sender != f"uid:{os.getuid()}":
                 return None
             source, actor = CLI_SOURCE, os_user()
             admit_cli_turn(runtime, str(kwargs.get("session_id") or ""), actor, text)
