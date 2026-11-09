@@ -183,6 +183,80 @@ def _process_tree(roots: Sequence[int], table: Mapping[int, _Process], groups: S
     return {pid: table[pid].started for pid in seen if table[pid].alive}
 
 
+def _gateway_pids() -> set[int]:
+    result = subprocess.run(
+        ["ps", "-A", "-o", "pid=,command="],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "LC_ALL": "C"},
+    )
+    if result.returncode != 0:
+        raise WorkerStopError(f"could not list processes: {result.stderr.strip()}")
+    pids = set()
+    for line in result.stdout.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        words = command.split()
+        if (
+            pid.isdigit()
+            and "gateway" in words
+            and "run" in words
+            and any(word == "hermes_cli.main" or word == "hermes" or word.endswith("/hermes") for word in words)
+        ):
+            pids.add(int(pid))
+    return pids
+
+
+def _cwds() -> dict[int, str]:
+    if Path("/proc/self/cwd").exists():
+        cwds = {}
+        for entry in Path("/proc").iterdir():
+            if entry.name.isdigit():
+                try:
+                    cwds[int(entry.name)] = os.readlink(entry / "cwd")
+                except OSError:
+                    continue
+        return cwds
+    result = subprocess.run(
+        ["lsof", "-a", "-u", str(os.getuid()), "-d", "cwd", "-Fn"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "LC_ALL": "C", "PATH": os.environ.get("PATH", "") + ":/usr/sbin:/usr/bin"},
+    )
+    cwds, pid = {}, None
+    for line in result.stdout.splitlines():
+        if line.startswith("p") and line[1:].isdigit():
+            pid = int(line[1:])
+        elif line.startswith("n") and pid is not None:
+            cwds[pid] = line[1:]
+    if not cwds:  # this process has a cwd too, so an empty list means lsof failed
+        raise WorkerStopError(f"could not list process directories: {result.stderr.strip()}")
+    return cwds
+
+
+def _gateway_commands_in(dirs: Sequence[Path], table: Mapping[int, _Process]) -> list[int]:
+    """Processes a Hermes gateway started whose cwd is in one of dirs. In Hermes 0.22.7 a worker's turn runs in a
+    gateway shared by every worker, so its commands (Opus in the background among them) are that gateway's
+    children, not the worker's: the walk from the worker never meets them. They start in the worker's directory and
+    the loops cd into the ticket's tree, so the directory finds them. Only gateway descendants count, so a shell or
+    an editor Leo opens in the tree is never touched."""
+    roots = [str(path.resolve()) for path in dirs if path.is_dir()]
+    if not roots:
+        return []
+    gateways = _gateway_pids()
+    found = []
+    for pid, cwd in _cwds().items():
+        if pid not in table or not any(cwd == root or cwd.startswith(root + os.sep) for root in roots):
+            continue
+        ancestor, hops = table[pid].ppid, 0
+        while ancestor > 1 and ancestor in table and ancestor not in gateways and hops < 64:
+            ancestor, hops = table[ancestor].ppid, hops + 1
+        if ancestor in gateways:
+            found.append(pid)
+    return found
+
+
 def _still_running(tree: Mapping[int, str], table: Mapping[int, _Process]) -> dict[int, str]:
     return {
         pid: started
@@ -199,10 +273,12 @@ def _signal_each(tree: Mapping[int, str], signum: int) -> None:
             continue  # gone already, or not ours to signal: the wait that follows reports any survivor
 
 
-def _tree_exited_within(group: int, tree: Mapping[int, str], seconds: float) -> bool:
+def _tree_exited_within(group: int | None, tree: Mapping[int, str], seconds: float) -> bool:
     deadline = time.monotonic() + seconds
     while True:
-        gone = not _group_has_live_member(group) and not (tree and _still_running(tree, _process_table()))
+        gone = (group is None or not _group_has_live_member(group)) and not (
+            tree and _still_running(tree, _process_table())
+        )
         if gone or time.monotonic() >= deadline:
             return gone
         time.sleep(_STOP_POLL_SECONDS)
@@ -279,36 +355,66 @@ class SubprocessBackend:
         return is_same_process(assignment.pid, assignment.started_at)
 
     def stop(self, assignment: Assignment) -> None:
-        if assignment.pid is None:
+        group = self._group_to_stop(assignment)
+        dirs = self._command_dirs(assignment)
+        table = _process_table()
+        commands = _gateway_commands_in(dirs, table)
+        if group is None and not commands:
             return
+        groups = [] if group is None else [group]
+        # Collect the whole tree before any signal: once a parent dies its children are reparented and lost. Hermes
+        # starts each terminal command in a new session, and a command can start another one with setsid. The leader
+        # may have exited already, so the walk also starts from every live member of its group, and from the
+        # commands its turn left in the shared gateway, which outlive the worker itself.
+        tree = _process_tree([*groups, *commands], table, groups=groups)
+        self._signal_group(group, signal.SIGTERM)
+        _signal_each(tree, signal.SIGTERM)
+        if _tree_exited_within(group, tree, _STOP_GRACE_SECONDS):
+            return
+        table = _process_table()
+        roots = [*groups, *_still_running(tree, table), *_gateway_commands_in(dirs, table)]
+        tree = _process_tree(roots, table, groups=groups)
+        self._signal_group(group, signal.SIGKILL)
+        _signal_each(tree, signal.SIGKILL)
+        if not _tree_exited_within(group, tree, _KILL_GRACE_SECONDS):
+            raise WorkerStopError(f"worker {assignment.id} or one of its commands survived SIGKILL")
+
+    def _command_dirs(self, assignment: Assignment) -> list[Path]:
+        """The worker's own directory, and the ticket's tree unless a later attempt works in it now (the reaper stops
+        an attempt 30 s after its final report, by which time an answer may have started the next one)."""
+        attempts = self.workdir_root / assignment.ticket_id
+        dirs = [attempts / assignment.id]
+        later = False
+        for identity in attempts.glob(f"*/{IDENTITY_FILENAME}"):
+            try:
+                later = later or int(json.loads(identity.read_text(encoding="utf-8"))["attempt"]) > assignment.attempt
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+        if not later:
+            dirs.append(self.workdir_root.parent / "trees" / assignment.ticket_id)
+        return dirs
+
+    @staticmethod
+    def _group_to_stop(assignment: Assignment) -> int | None:
+        if assignment.pid is None:
+            return None
         group = assignment.pid
         leader_started_at = _process_started_at(group)
         if leader_started_at is None:
             if _pid_exists(group):
                 raise WorkerStopError(f"could not read the start time of process {group}")
             if not _group_has_live_member(group):
-                return
+                return None
             if time.time() - assignment.started_at > _LEADERLESS_GROUP_MAX_AGE_SECONDS:
                 raise WorkerStopError(f"process group {group} has no leader and is too old to identify")
         elif abs(leader_started_at - assignment.started_at) > _PID_START_TOLERANCE_SECONDS:
-            return
-        # Collect the whole tree before any signal: once a parent dies its children are reparented and lost. Hermes
-        # starts each terminal command in a new session, and a command can start another one with setsid. The leader
-        # may have exited already, so the walk also starts from every live member of its group.
-        tree = _process_tree([group], _process_table(), groups=[group])
-        self._signal_group(group, signal.SIGTERM)
-        _signal_each(tree, signal.SIGTERM)
-        if _tree_exited_within(group, tree, _STOP_GRACE_SECONDS):
-            return
-        table = _process_table()
-        tree = _process_tree([group, *_still_running(tree, table)], table, groups=[group])
-        self._signal_group(group, signal.SIGKILL)
-        _signal_each(tree, signal.SIGKILL)
-        if not _tree_exited_within(group, tree, _KILL_GRACE_SECONDS):
-            raise WorkerStopError(f"process group {group} or one of its descendants survived SIGKILL")
+            return None
+        return group
 
     @staticmethod
-    def _signal_group(group: int, signum: int) -> None:
+    def _signal_group(group: int | None, signum: int) -> None:
+        if group is None:
+            return
         try:
             os.killpg(group, signum)
         except ProcessLookupError:

@@ -384,3 +384,82 @@ def test_the_tree_starts_from_the_group_when_the_leader_has_exited() -> None:
     }
     assert _process_tree([100], table) == {}
     assert set(_process_tree([100], table, groups=[100])) == {110, 111, 112}
+
+
+FAKE_GATEWAY = (
+    "import subprocess, sys, time\n"
+    "for cwd in sys.argv[1].split(','):\n"
+    "    p = subprocess.Popen(['sleep', '60'], cwd=cwd, start_new_session=True)\n"
+    "    print(p.pid, flush=True)\n"
+    "time.sleep(60)\n"
+)
+
+
+def _alive(pid: int) -> bool:
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return bool(state) and "Z" not in state
+
+
+def _gateway_with_commands_in(*dirs: Path) -> tuple[subprocess.Popen[str], list[int]]:
+    """A process that looks like a Hermes gateway in ps, with one detached command in each of dirs."""
+    for path in dirs:
+        path.mkdir(parents=True, exist_ok=True)
+    gateway = subprocess.Popen(
+        [sys.executable, "-c", FAKE_GATEWAY, ",".join(map(str, dirs)), "hermes_cli.main", "gateway", "run"],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert gateway.stdout is not None
+    return gateway, [int(gateway.stdout.readline()) for _ in dirs]
+
+
+def _finish(gateway: subprocess.Popen[str], pids: list[int]) -> None:
+    for pid in pids:
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+    gateway.kill()
+    gateway.wait()
+
+
+def test_stop_kills_the_commands_a_shared_gateway_runs_for_the_worker(tmp_path: Path) -> None:
+    workers = tmp_path / "workers"
+    gateway, (in_workdir, in_tree, other_ticket) = _gateway_with_commands_in(
+        workers / "tk-1" / "as-1", tmp_path / "trees" / "tk-1" / "src", tmp_path / "trees" / "tk-10"
+    )
+    leos_shell = subprocess.Popen(["sleep", "60"], cwd=tmp_path / "trees" / "tk-1", start_new_session=True)
+    try:
+        SubprocessBackend(["worker", "{brief}"], workers).stop(
+            Assignment("as-1", "tk-1", 1, AssignmentStatus.RUNNING, None, time.time())
+        )
+        deadline = time.time() + 5
+        while (_alive(in_workdir) or _alive(in_tree)) and time.time() < deadline:
+            time.sleep(0.05)
+        assert not _alive(in_workdir) and not _alive(in_tree)
+        assert _alive(other_ticket), "a command of another ticket (tk-10) was stopped"
+        assert leos_shell.poll() is None, "a process the gateway did not start was stopped"
+        assert gateway.poll() is None, "the shared gateway itself was stopped"
+    finally:
+        leos_shell.kill()
+        _finish(gateway, [in_workdir, in_tree, other_ticket])
+
+
+def test_stop_leaves_the_tree_to_a_later_attempt(tmp_path: Path) -> None:
+    workers = tmp_path / "workers"
+    (workers / "tk-1" / "as-2").mkdir(parents=True)
+    write_identity(workers / "tk-1" / "as-2", "tk-1", "as-2", "token", 2, "claude-assisted-loop", str(tmp_path))
+    gateway, (in_old_workdir, in_tree) = _gateway_with_commands_in(
+        workers / "tk-1" / "as-1", tmp_path / "trees" / "tk-1"
+    )
+    try:
+        SubprocessBackend(["worker", "{brief}"], workers).stop(
+            Assignment("as-1", "tk-1", 1, AssignmentStatus.ENDED, None, time.time())
+        )
+        deadline = time.time() + 5
+        while _alive(in_old_workdir) and time.time() < deadline:
+            time.sleep(0.05)
+        assert not _alive(in_old_workdir)
+        assert _alive(in_tree), "the reaper of attempt 1 stopped attempt 2's command in the tree"
+    finally:
+        _finish(gateway, [in_old_workdir, in_tree])
