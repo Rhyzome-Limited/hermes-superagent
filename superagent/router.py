@@ -54,7 +54,9 @@ _DOT = f"[{_DOTS}]"
 # A character a host name can hold, by Telegram's rule. Below U+00C0 that is a letter, a digit, "_" or "-" (and the
 # soft hyphen, which IDNA drops). From U+00C0 up it is anything but a space or a dot. Real IDN hosts need this:
 # combining marks and joiners are not \w, yet they sit inside labels and TLDs, as in xn--h2brj9c (.bharat).
-_NOT_IN_HOST = "".join(f"\\x{code:02x}" for code in range(0xC0) if not re.fullmatch(r"[\w\xad-]", chr(code)))
+# The Markdown markers * ~ | and ` count too: Hermes's Telegram formatter turns them into formatting, so Telegram
+# reads **evil**.com or evil.c`om` as evil.com.
+_NOT_IN_HOST = "".join(f"\\x{code:02x}" for code in range(0xC0) if not re.fullmatch(r"[\w\xad*~|`-]", chr(code)))
 _HOST_CHAR = rf"[^\s{_NOT_IN_HOST}{_DOTS}]"
 # A host as chat apps auto-link it without a scheme: attacker.example, a.b.co.uk, README.md, 10.0.0.1. The TLD
 # starts with anything but a digit, "_" or "-", so versions such as v0.22.7 stay. A host starts only at the first

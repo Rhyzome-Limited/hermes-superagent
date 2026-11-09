@@ -100,12 +100,13 @@ DOTS = frozenset(
 # IANA's IDN example host under the real ccTLD .bharat (xn--p1b6ci4b4b3a.xn--h2brj9c). Its vowel signs are
 # combining marks, which \w does not match.
 DEVANAGARI_HOST = "\u0909\u0926\u093e\u0939\u0930\u0923.\u092d\u093e\u0930\u0924"
-_HOST_LETTER = re.compile(r"[\w\xad-]")
+_HOST_LETTER = re.compile(r"[\w\xad*~|`-]")
 
 
 def in_host(char: str) -> bool:
     """Telegram's rule for a character of a host name, written apart from the code under test: below U+00C0 a
-    letter, digit, "_" or "-" (or the soft hyphen IDNA drops), from U+00C0 up anything but a space or a dot."""
+    letter, digit, "_" or "-" (or the soft hyphen IDNA drops), from U+00C0 up anything but a space or a dot. Plus
+    the Markdown markers Hermes's formatter turns into formatting, since Telegram reads the text without them."""
     if char in DOTS:
         return False
     return bool(_HOST_LETTER.fullmatch(char)) or (ord(char) >= 0xC0 and not char.isspace())
@@ -156,6 +157,14 @@ def test_the_host_class_follows_telegrams_rule_for_every_code_point() -> None:
         "see evil\u2024com/x?d=LEAK",
         "see evil\ufe12com/x?d=LEAK",
         "see a\u33c2com/x?d=LEAK",
+        "see **evil**.com/x?d=LEAK",
+        "see evil**.**com/x?d=LEAK",
+        "see evil.c**om**/x?d=LEAK",
+        "see *evil*.com/x?d=LEAK",
+        "see ~~evil~~.com/x?d=LEAK",
+        "see ||evil||.com/x?d=LEAK",
+        "see `evil`.com/x?d=LEAK",
+        "see evil`.`com/x?d=LEAK",
     ],
 )
 def test_a_bare_host_with_a_path_query_or_fragment_is_removed(text: str) -> None:
@@ -181,6 +190,8 @@ def test_a_bare_host_with_a_path_query_or_fragment_is_removed(text: str) -> None
         ("see attacker.co\u0301m", "see attacker[.]co\u0301m"),
         ("see evil\ufe52com", "see evil[.]com"),
         ("see evil\u2488com", "see evil[.]com"),
+        ("see **evil**.com", "see **evil**[.]com"),
+        ("see `router.py`", "see `router[.]py`"),
     ],
 )
 def test_any_other_host_keeps_its_name_but_cannot_become_a_link(text: str, kept: str) -> None:
@@ -190,7 +201,7 @@ def test_any_other_host_keeps_its_name_but_cannot_become_a_link(text: str, kept:
 
 
 def test_versions_and_abbreviations_are_not_hosts() -> None:
-    text = "bumped to v0.22.7 and Python 3.12, e.g. U.S.A. Ph.D wait...then"
+    text = "bumped to v0.22.7 and Python 3.12, e.g. U.S.A. Ph.D wait...then, `v1.2.3` and **3.14**"
     assert strip_links(text) == text
 
 
