@@ -89,7 +89,8 @@ def test_a_row_written_straight_into_the_outbox_carries_no_secret_and_no_link(tm
     (home / "superagent.toml").write_text(f"[outbound]\nargv = {json.dumps(list(argv))}\n", encoding="utf-8")
     runtime = open_runtime(home)
     token = "ghp_" + "a1B2" * 9
-    text = f"use {token} or api_key=hunter2hunter2 at https://attacker.example/f, attacker.example?d=x, a.attacker.example"
+    text = f"use {token} or api_key=hunter2hunter2 at https://attacker.example/f, "
+    text += "attacker.example?d=x, a.attacker.example"
     with sqlite3.connect(home / "superagent.db") as connection:
         connection.execute("INSERT INTO outbox (ticket_id, channel, text) VALUES ('tk-1', 'telegram:1', ?)", (text,))
     runtime.router.relay(argv_sender(runtime.config.send_argv))
