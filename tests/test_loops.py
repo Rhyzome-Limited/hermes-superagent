@@ -3,13 +3,26 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
-from superagent.domain import DEFAULT_LOOP, Loop, Trigger
+from superagent.domain import (
+    DEFAULT_LOOP,
+    Assignment,
+    AssignmentStatus,
+    Loop,
+    Mandate,
+    Strength,
+    Ticket,
+    TicketStatus,
+    Trigger,
+)
+from superagent.gate import Rules
 from superagent.router import Outcome, Router, route_loop
 from superagent.store import Store
+from superagent.worker import SubprocessBackend
 
 from .conftest import FakeBackend
 from .test_plugin import FakeContext as PluginContext
@@ -161,3 +174,37 @@ def test_dispatch_tool_requires_a_loop_from_the_fixed_list(tmp_path: Path) -> No
     )
     assert answer["loop"] == "kastle-build-loop"
     assert Store(tmp_path / "superagent.db").get_ticket(answer["ticket"]).loop == "kastle-build-loop"
+
+
+PRINT_ARGV = "import json, sys; print(json.dumps(sys.argv[1:]), flush=True)"
+
+
+def wait_for_log(log: Path) -> str:
+    deadline = time.time() + 10
+    while (not log.exists() or not log.read_text()) and time.time() < deadline:
+        time.sleep(0.05)
+    return log.read_text()
+
+
+def test_worker_argv_runs_kastle_build_loop_for_a_kastle_ui_fix_asked_as_claude_assisted_loop(
+    tmp_path: Path, store: Store, rules: Rules
+) -> None:
+    script = tmp_path / "argv.py"
+    script.write_text(PRINT_ARGV, encoding="utf-8")
+    argv = [sys.executable, str(script), "{brief}", "-s", "{loop}", "--ticket", "{ticket}"]
+    router = Router(store, rules, SubprocessBackend(argv, tmp_path / "workers"))
+    admit(router, "t1", "fix the cut-off onboarding button in kastle-mobile")
+    ticket = router.dispatch("t1", "Fix the cut-off onboarding button in kastle-mobile", "claude-assisted-loop")
+    [assignment] = router.store.running_assignments()
+    printed = json.loads(wait_for_log(tmp_path / "workers" / ticket.id / assignment.id / "worker.log"))
+    assert printed[1:] == ["-s", "kastle-build-loop", "--ticket", ticket.id]
+    assert printed[0].endswith("brief.md")
+
+
+def test_an_argv_that_needs_a_loop_refuses_a_ticket_without_one(tmp_path: Path) -> None:
+    backend = SubprocessBackend([sys.executable, "-c", "pass", "{brief}", "-s", "{loop}"], tmp_path / "workers")
+    mandate = Mandate("v1", "g", Strength.EXPLICIT, "alice", "chat", "t1")
+    legacy = Ticket("tk-1", "g", mandate, "chat:1", TicketStatus.OPEN)
+    with pytest.raises(OSError, match="has no loop"):
+        backend.start(legacy, Assignment("as-1", "tk-1", 1, AssignmentStatus.RUNNING, None, time.time()), "token")
+    assert not (tmp_path / "workers").exists()

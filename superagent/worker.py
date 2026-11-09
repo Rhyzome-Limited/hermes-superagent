@@ -27,6 +27,7 @@ _KILL_GRACE_SECONDS = 2.0
 _LEADERLESS_GROUP_MAX_AGE_SECONDS = 6 * 3600.0
 _OUTPUT_TAIL_BYTES = 4000
 _TERMINAL_ESCAPES = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_ARGV_PLACEHOLDER = re.compile(r"\{(brief|loop|ticket)\}")
 
 
 class WorkerStopError(RuntimeError):
@@ -135,6 +136,8 @@ class SubprocessBackend:
     def start(self, ticket: Ticket, assignment: Assignment, token: str, context: str = "") -> int:
         if not self.argv:
             raise OSError("no [worker] argv is configured, so no worker can start")
+        if not ticket.loop and any("{loop}" in part for part in self.argv):
+            raise OSError(f"ticket {ticket.id} has no loop, and [worker] argv needs {{loop}}")
         workdir = self.workdir_root / ticket.id / assignment.id
         workdir.mkdir(parents=True, exist_ok=True)
         brief = workdir / "brief.md"
@@ -142,7 +145,8 @@ class SubprocessBackend:
         write_identity(workdir, ticket.id, assignment.id, token, assignment.attempt)
         env = {name: os.environ[name] for name in _INHERITED_ENV if name in os.environ}
         env.update(self.extra_env)
-        argv = [part.replace("{brief}", str(brief)) for part in self.argv]
+        values = {"brief": str(brief), "loop": ticket.loop, "ticket": ticket.id}
+        argv = [_ARGV_PLACEHOLDER.sub(lambda match: values[match.group(1)], part) for part in self.argv]
         with (workdir / "worker.log").open("ab") as log:
             process = subprocess.Popen(
                 argv,

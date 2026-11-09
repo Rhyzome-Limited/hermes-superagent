@@ -320,7 +320,7 @@ The rendered prompt becomes the goal, the comment's author is checked against `a
 | `[sources."webhook:<route>"] via_router` | `false` | Lets the router's model read this webhook's admitted events instead of starting work directly. Authors still go through `allow` |
 | `[[semantic]] name`, `text` | required | A team rule, written in plain language |
 | `[[semantic]] mode` | `record` | `record` only logs, `act` opens a ticket |
-| `[worker] argv` | required | Command for one worker, must reference `{brief}` |
+| `[worker] argv` | required | Command for one worker, must reference `{brief}`, the file holding the task. `{loop}` becomes the ticket's loop, for example `-s {loop}`, and `{ticket}` its id. The goal never reaches the argv. A ticket with no loop, from a database older than loops, refuses to start when the argv needs `{loop}` |
 | `[worker] allow_same_user` | `false` | Allows host tools in a worker with no sandbox |
 | `[outbound] argv` | none | Delivery command using `{channel}` and `{text}`. Without it nothing is sent, and messages are still marked sent. A failed send fails every tick until it gets through. Retries back off up to 30 minutes and never give up, and `superagent outbox` lists what's waiting or drops a message for good. Messages over 1900 characters go out in numbered parts |
 | `[digest] channel` | none | Where `superagent digest --send` and the daily digest blueprint deliver |
