@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
+from .agents import redact
 from .domain import (
     DEFAULT_LOOP,
     DEFAULT_MAX_RUNNING,
@@ -38,6 +39,13 @@ OFFER_VALID_SECONDS = 3600.0
 _ATTACHMENT_TAG = re.compile(r"media:", re.IGNORECASE)
 _DIRECTIVE_OPENING = re.compile(r"\[(?=\[)")
 _MENTION = re.compile(r"@(?=everyone|here)|<@|<#")
+_IMAGE_OPENING = re.compile(r"!(?=\[)")
+_IMAGE_TAG = re.compile(r"!\[[^\]\n]*\]\([^)\n]*\)|<img\b[^>]*>", re.IGNORECASE)
+_MARKDOWN_LINK = re.compile(r"\[([^\]\n]*)\]\([^)\n]*\)")
+_GITHUB_ITEM = re.compile(
+    r"(?:https?://)?(?:www\.)?github\.com/([\w.-]+/[\w.-]+)/(?:pull|issues)/(\d+)(?:[/#?][^\s)\]]*)?", re.IGNORECASE
+)
+_URL = re.compile(r"(?:\b[a-z][a-z0-9+.-]*://|\bwww\.)\S+|\b(?:[a-z0-9-]+\.)+[a-z]{2,}/\S*", re.IGNORECASE)
 # A Kastle repo named on its own or as owner/name: a hyphen continues a repo name, so kastle-push is another repo.
 _KASTLE_REPO = re.compile(r"(?<![\w-])kastle(?:-mobile)?(?![\w-])", re.IGNORECASE)
 _KASTLE_TICKET = re.compile(r"(?<![\w-])CMPY-\d+(?!\w)", re.IGNORECASE)
@@ -321,7 +329,14 @@ class Router:
 
 def chat_safe(text: str) -> str:
     quiet = _MENTION.sub(lambda match: match.group(0)[0] + "\u200b" + match.group(0)[1:], text)
-    return _DIRECTIVE_OPENING.sub("[ ", _ATTACHMENT_TAG.sub("media ", quiet))
+    return _IMAGE_OPENING.sub("! ", _DIRECTIVE_OPENING.sub("[ ", _ATTACHMENT_TAG.sub("media ", quiet)))
+
+
+def strip_links(text: str) -> str:
+    """Worker text reaches chat with no image and no clickable link. A GitHub pull request or issue keeps its
+    reference as owner/repo#N, and every other URL is removed."""
+    text = _MARKDOWN_LINK.sub(r"\1", _IMAGE_TAG.sub("", text))
+    return _URL.sub("[link removed]", _GITHUB_ITEM.sub(r"\1#\2", text))
 
 
 def shorten(text: str, limit: int = CHAT_WORD_LIMIT) -> str:
@@ -338,8 +353,8 @@ def _render_report(report: Report, goal: str) -> str | None:
         return None
     text = report.question if report.question else report.summary
     prefix = "Done" if report.state is ReportState.READY else report.state.value.capitalize()
-    return chat_safe(shorten(f"{prefix} {task_label(report.ticket_id, goal)}: {text}"))
+    return chat_safe(shorten(strip_links(redact(f"{prefix} {task_label(report.ticket_id, goal)}: {text}"))))
 
 
 def _render_escalation(reason: str, ticket_id: str, goal: str) -> str:
-    return chat_safe(shorten(f"Needs you {task_label(ticket_id, goal)}: {reason}"))
+    return chat_safe(shorten(strip_links(redact(f"Needs you {task_label(ticket_id, goal)}: {reason}"))))

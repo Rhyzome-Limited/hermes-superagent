@@ -686,7 +686,7 @@ def test_messages_the_old_attempt_cap_gave_up_on_are_retried_again(tmp_path: Pat
 
 
 def test_a_long_worker_summary_is_split_to_fit(router: Router, backend: FakeBackend) -> None:
-    done_report(router, backend, "x" * 2500)
+    done_report(router, backend, " ".join(["x" * 30] * 80))
     texts = [text for _, _, text in router.relay()]
     assert len(texts) == 2
     assert all(len(text) <= MESSAGE_LIMIT for text in texts)
