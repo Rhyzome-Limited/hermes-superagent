@@ -158,6 +158,7 @@ def check_once(
         results.append(CheckResult(assignment.id, ticket.id, judgement.verdict, action, judgement.reason))
     for ticket in router.store.orphaned_tickets(active_policy.orphan_after_seconds):
         results.append(_repair_orphan(router, ticket, active_policy))
+    router.start_queued()
     return results
 
 

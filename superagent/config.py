@@ -8,6 +8,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .connectors import ConnectorConfigError, ConnectorSpec, duration, parse_specs
+from .domain import DEFAULT_MAX_RUNNING
 from .gate import Rules, RulesError, parse_rules
 from .watchdog import WatchdogPolicy
 
@@ -31,7 +32,7 @@ _KNOWN_KEYS = {
     },
     "sources": {"policy", "allow", "bots", "pass_strangers", "notify", "via_router"},
     "semantic": {"name", "text", "mode"},
-    "worker": {"argv", "allow_same_user"},
+    "worker": {"argv", "allow_same_user", "max_running"},
     "outbound": {"argv"},
     "digest": {"channel"},
     "channels": {"alerts", "brief"},
@@ -49,6 +50,7 @@ class Config:
     watchdog: WatchdogPolicy
     allow_same_user: bool = False
     problem: str = ""
+    max_running: int = DEFAULT_MAX_RUNNING
     digest_channel: str = ""
     alerts_channel: str = ""
     heartbeat_argv: tuple[str, ...] = ()
@@ -91,6 +93,9 @@ def parse_config(raw: str) -> Config:
     except (TypeError, ValueError) as error:
         raise ConfigError(f"invalid [watchdog] section: {error}") from error
     allow_same_user = bool(data.get("worker", {}).get("allow_same_user", False))
+    max_running = data.get("worker", {}).get("max_running", DEFAULT_MAX_RUNNING)
+    if isinstance(max_running, bool) or not isinstance(max_running, int) or max_running < 1:
+        raise ConfigError("[worker] max_running must be a whole number of at least 1")
     digest_channel = str(data.get("digest", {}).get("channel", ""))
     tick_section = _table(data, "tick")
     deadline = _number(tick_section, "tick", "deadline_seconds", 600.0, minimum=1.0)
@@ -137,6 +142,7 @@ def parse_config(raw: str) -> Config:
         brief_hour=hour,
         brief_timezone=str(timezone),
         stale_after_seconds=stale_after,
+        max_running=max_running,
     )
 
 

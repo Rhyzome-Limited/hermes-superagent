@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import signal
 import subprocess
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
 from .domain import Assignment, Ticket
+
+logger = logging.getLogger(__name__)
 
 IDENTITY_FILENAME = ".superagent-identity.json"
 ROLE_WORKER = "worker"
@@ -144,6 +147,8 @@ class SubprocessBackend:
         self.argv = list(argv)
         self.workdir_root = workdir_root
         self.extra_env = dict(extra_env or {})
+        # Called once a worker this process started has exited, so a queued ticket can take its slot.
+        self.on_exit: Callable[[], object] | None = None
 
     def start(self, ticket: Ticket, assignment: Assignment, token: str, context: str = "") -> int:
         if not self.argv:
@@ -170,8 +175,17 @@ class SubprocessBackend:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
-        threading.Thread(target=process.wait, daemon=True).start()
+        threading.Thread(target=self._reap, args=(process,), daemon=True).start()
         return process.pid
+
+    def _reap(self, process: subprocess.Popen[bytes]) -> None:
+        process.wait()
+        if self.on_exit is None:
+            return
+        try:
+            self.on_exit()
+        except Exception:
+            logger.exception("a worker ended but the next queued ticket could not start, the next tick retries")
 
     def last_output(self, assignment: Assignment) -> str:
         log = self.workdir_root / assignment.ticket_id / assignment.id / "worker.log"

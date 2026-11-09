@@ -30,6 +30,7 @@ HUMAN_FACING_REPORT_STATES = frozenset({ReportState.READY, ReportState.BLOCKED, 
 class TicketStatus(StrEnum):
     OPEN = "open"
     WAITING = "waiting"
+    QUEUED = "queued"
     ENDED = "ended"
 
 
@@ -41,6 +42,8 @@ class Loop(StrEnum):
 
 # Work that reaches a ticket without the router choosing, such as an act-mode rule or `superagent ingest`.
 DEFAULT_LOOP = Loop.CLAUDE_ASSISTED
+# Live workers at once, the cap the builder's claude-multi-loop kept (task 2.9).
+DEFAULT_MAX_RUNNING = 4
 
 
 class ScopeClass(StrEnum):

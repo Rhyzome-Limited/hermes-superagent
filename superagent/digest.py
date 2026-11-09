@@ -27,6 +27,7 @@ def build_digest(store: Store, since: float, hours: float) -> str:
     escalated = store.escalations_since(since)
     waiting = [item for item in store.live_tickets() if item.status is TicketStatus.WAITING]
     running = sum(1 for item in store.live_tickets() if item.status is TicketStatus.OPEN)
+    queued = sum(1 for item in store.live_tickets() if item.status is TicketStatus.QUEUED)
     recorded = store.assessments_since(since, RECORDED_PREFIX)
     ignored = store.admission_counts_since(since, Admission.IGNORE)
     undelivered = store.undelivered_count()
@@ -40,6 +41,8 @@ def build_digest(store: Store, since: float, hours: float) -> str:
     lines += _rule_section(recorded)
     if running:
         lines.append(f"Running: {running}")
+    if queued:
+        lines.append(f"Queued: {queued}")
     if ignored:
         counts = ", ".join(f"{source} {count}" for source, count in Counter(ignored).most_common())
         lines.append(f"Ignored events: {counts}")

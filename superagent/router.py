@@ -9,6 +9,7 @@ from typing import Protocol
 
 from .domain import (
     DEFAULT_LOOP,
+    DEFAULT_MAX_RUNNING,
     HUMAN_FACING_REPORT_STATES,
     Admission,
     Assignment,
@@ -91,10 +92,13 @@ class NotAdmittedError(PermissionError):
 
 
 class Router:
-    def __init__(self, store: Store, rules: Rules, backend: WorkerBackend) -> None:
+    def __init__(
+        self, store: Store, rules: Rules, backend: WorkerBackend, max_running: int = DEFAULT_MAX_RUNNING
+    ) -> None:
         self.store = store
         self.rules = rules
         self.backend = backend
+        self.max_running = max_running
 
     def ingest(self, trigger: Trigger, *, auto_dispatch: bool = True) -> Disposition:
         decision = gate(trigger, self.rules)
@@ -150,6 +154,7 @@ class Router:
         for assignment in self.store.running_assignments():
             if assignment.ticket_id == ticket_id and self.store.end_assignment(assignment.id):
                 self.backend.stop(assignment)
+        self.start_queued()
         return self.store.get_ticket(ticket_id)
 
     def _claim_for_ticket(self, trigger_id: str, ticket_id: str, assessment: str) -> tuple[Trigger, Ticket]:
@@ -247,10 +252,17 @@ class Router:
         return rules is not None and trigger.actor in rules.allow
 
     def start_worker(self, ticket: Ticket) -> Assignment | None:
-        created = self.store.create_assignment(ticket.id)
+        created = self.store.create_assignment(ticket.id, self.max_running)
         if created is None:
             return None
         return self._launch(ticket, *created)
+
+    def start_queued(self) -> list[Assignment]:
+        """Start queued tickets, oldest first, while fewer than max_running workers run."""
+        started: list[Assignment] = []
+        while (claimed := self.store.start_next_queued(self.max_running)) is not None:
+            started.append(self._launch(*claimed))
+        return started
 
     def _launch(self, ticket: Ticket, assignment: Assignment, token: str) -> Assignment:
         pending = self.store.pending_inputs(ticket.id)
@@ -280,9 +292,10 @@ class Router:
         source = self.rules.sources.get(trigger.source)
         channel = source.notify if source is not None and source.notify else trigger.channel
         ticket, created = self.store.create_ticket(goal, mandate, channel, trigger.thread, loop.value, repo)
-        if created:
-            self.start_worker(ticket)
-        return ticket
+        if not created:
+            return ticket
+        self.start_worker(ticket)
+        return self.store.get_ticket(ticket.id)
 
     def _pass_through(self, trigger: Trigger, subscribers: list[str]) -> Disposition:
         framed = frame_trigger(trigger)
@@ -295,7 +308,7 @@ class Router:
         return Disposition(Outcome.PASSED_THROUGH, "thread has a live subscriber", tuple(subscribers))
 
     def _resume_if_waiting(self, ticket: Ticket) -> None:
-        resumed = self.store.resume_waiting_ticket(ticket.id)
+        resumed = self.store.resume_waiting_ticket(ticket.id, self.max_running)
         if resumed is not None:
             self._launch(ticket, *resumed)
 
