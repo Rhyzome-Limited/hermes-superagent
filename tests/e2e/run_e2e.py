@@ -223,7 +223,8 @@ def scenario_role_unset(runtime: Runtime, log: Path, work: Path, profile: Path, 
 STOP_MARKER = "superagent-e2e-stopped"  # on the worker's own command line, so another process can't stand in for it
 
 
-def scenario_stop(runtime: Runtime, log: Path) -> None:
+def scenario_stop(runtime: Runtime, log: Path, work: Path) -> None:
+    (work / STOP_MARKER).symlink_to(shutil.which("sleep") or "/bin/sleep")
     ticket = start_task(runtime, "scenario=stop id=stopped")
     running = wait_until(lambda: subprocess.run(["pgrep", "-f", STOP_MARKER], check=False).returncode == 0)
     check("stop: the worker's command started", running, turns(log, "stopped")[-3:])
@@ -588,7 +589,7 @@ def main() -> int:
         configure_worker(hermes_home / "profiles" / "worker", open_home, tool_search="off")
         opened = open_runtime(open_home)
         scenario_wander(opened)
-        scenario_stop(opened, log)
+        scenario_stop(opened, log, work)
         scenario_host_env()
         scenario_environment_untouched(hermes_home)
         stage_router(work, log)

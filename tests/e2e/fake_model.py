@@ -75,7 +75,7 @@ SCRIPTS = {
     ],
     "stop": [
         Step("superagent_report", {"state": "progress", "summary": "started {id}"}),
-        Step("terminal", {"command": 'python3 -c "import time; time.sleep(300)" superagent-e2e-{id}'}),
+        Step("terminal", {"command": "{work}/superagent-e2e-{id} 300"}),
         Step("superagent_report", {"state": "ready", "summary": "should never run {id}"}),
     ],
 }
