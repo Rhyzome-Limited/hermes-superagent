@@ -33,6 +33,16 @@ class TicketStatus(StrEnum):
     ENDED = "ended"
 
 
+class Loop(StrEnum):
+    KASTLE_BUILD = "kastle-build-loop"
+    CLAUDE_ASSISTED = "claude-assisted-loop"
+    BUILD = "build-loop"
+
+
+# Work that reaches a ticket without the router choosing, such as an act-mode rule or `superagent ingest`.
+DEFAULT_LOOP = Loop.CLAUDE_ASSISTED
+
+
 class AssignmentStatus(StrEnum):
     RUNNING = "running"
     ENDED = "ended"
@@ -81,6 +91,8 @@ class Ticket:
     mandate: Mandate
     channel: str
     status: TicketStatus
+    loop: str = ""
+    repo: str = ""
 
 
 @dataclass(frozen=True)

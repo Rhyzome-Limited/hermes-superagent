@@ -11,7 +11,7 @@ from typing import Any
 from .cli import run, setup_parser
 from .config import load_config
 from .digest import DigestError, build_digest, send_digest
-from .domain import ReportState, Trigger
+from .domain import Loop, ReportState, Trigger
 from .framing import frame_trigger
 from .guard import (
     TOOL_CANCEL,
@@ -62,8 +62,16 @@ DISPATCH_SCHEMA = {
         "properties": {
             "trigger_id": {"type": "string", "description": "Id of the admitted trigger."},
             "goal": {"type": "string", "description": "One clear paragraph describing the task and its limits."},
+            "loop": {
+                "type": "string",
+                "enum": [loop.value for loop in Loop],
+                "description": "The one loop the worker runs: kastle-build-loop for kastle-mobile or kastle work "
+                "(forced in code for those repos and CMPY tickets), build-loop for a manifest or a ticket queue, "
+                "claude-assisted-loop to build or implement in any other repo. If unsure, ask instead of dispatching.",
+            },
+            "repo": {"type": "string", "description": "Repository the task is in, such as owner/name, if known."},
         },
-        "required": ["trigger_id", "goal"],
+        "required": ["trigger_id", "goal", "loop"],
     },
 }
 FORWARD_SCHEMA = {
@@ -231,13 +239,18 @@ class Plugin:
         if self.role != ROLE_ROUTER:
             return _error("superagent_dispatch only works in the router")
         try:
-            ticket = self.runtime().router.dispatch(str(args.get("trigger_id", "")), str(args.get("goal", "")))
-        except NotAdmittedError as error:
+            ticket = self.runtime().router.dispatch(
+                str(args.get("trigger_id", "")),
+                str(args.get("goal", "")),
+                str(args.get("loop") or ""),
+                str(args.get("repo") or ""),
+            )
+        except (NotAdmittedError, ValueError) as error:
             return _error(str(error))
         except Exception as error:
             logger.exception("dispatch failed")
             return _error(f"dispatch failed: {error}")
-        return json.dumps({"ticket": ticket.id, "status": ticket.status.value})
+        return json.dumps({"ticket": ticket.id, "status": ticket.status.value, "loop": ticket.loop})
 
     def forward_tool(self, args: Mapping[str, Any], **kwargs: Any) -> str:
         if self.role != ROLE_ROUTER:

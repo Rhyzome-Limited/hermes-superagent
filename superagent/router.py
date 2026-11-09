@@ -8,9 +8,11 @@ from enum import StrEnum
 from typing import Protocol
 
 from .domain import (
+    DEFAULT_LOOP,
     HUMAN_FACING_REPORT_STATES,
     Admission,
     Assignment,
+    Loop,
     Mandate,
     Report,
     ReportState,
@@ -35,6 +37,23 @@ OFFER_VALID_SECONDS = 3600.0
 _ATTACHMENT_TAG = re.compile(r"media:", re.IGNORECASE)
 _DIRECTIVE_OPENING = re.compile(r"\[(?=\[)")
 _MENTION = re.compile(r"@(?=everyone|here)|<@|<#")
+# A Kastle repo named on its own or as owner/name: a hyphen continues a repo name, so kastle-push is another repo.
+_KASTLE_REPO = re.compile(r"(?<![\w-])kastle(?:-mobile)?(?![\w-])", re.IGNORECASE)
+_KASTLE_TICKET = re.compile(r"(?<![\w-])CMPY-\d+(?!\w)", re.IGNORECASE)
+MAX_REPO_CHARS = 200
+
+
+def route_loop(requested: str, goal: str, repo: str = "") -> Loop:
+    """The loop a ticket runs: the router's pick from a fixed list, except that work on the Kastle repos or a
+    CMPY ticket always runs kastle-build-loop, whatever was asked."""
+    try:
+        loop = Loop(requested)
+    except ValueError as error:
+        raise ValueError(f"loop must be one of {', '.join(item.value for item in Loop)}, got {requested!r}") from error
+    named = f"{repo}\n{goal}"
+    if _KASTLE_REPO.search(named) or _KASTLE_TICKET.search(named):
+        return Loop.KASTLE_BUILD
+    return loop
 
 
 class Outcome(StrEnum):
@@ -95,13 +114,17 @@ class Router:
         if not auto_dispatch:
             return Disposition(Outcome.ADMITTED, decision.reason)
         self.store.mark_assessed(trigger.id, "dispatched")
-        ticket = self._open_ticket(trigger, trigger.text, Strength.EXPLICIT)
+        ticket = self._open_ticket(trigger, trigger.text, Strength.EXPLICIT, route_loop(DEFAULT_LOOP, trigger.text))
         return Disposition(Outcome.DISPATCHED, decision.reason, (ticket.id,))
 
-    def dispatch(self, trigger_id: str, goal: str) -> Ticket:
+    def dispatch(self, trigger_id: str, goal: str, loop: str = DEFAULT_LOOP, repo: str = "") -> Ticket:
+        repo = repo.strip()
+        if len(repo) > MAX_REPO_CHARS:
+            raise ValueError(f"repo must be at most {MAX_REPO_CHARS} characters")
+        routed = route_loop(loop, goal, repo)
         trigger = self._admitted_trigger(trigger_id)
         if self.store.claim_offered_trigger(trigger_id, "dispatched", OFFER_VALID_SECONDS):
-            return self._open_ticket(trigger, goal, Strength.EXPLICIT)
+            return self._open_ticket(trigger, goal, Strength.EXPLICIT, routed, repo)
         existing = self.store.ticket_for_trigger(trigger_id)
         if existing is not None and self.store.assessment_of(trigger_id) == "dispatched":
             return existing
@@ -165,7 +188,8 @@ class Router:
                 self.store.mark_assessed(trigger.id, f"recorded by {assessment.rule}: {assessment.goal}")
                 continue
             self.store.mark_assessed(trigger.id, f"accepted by {assessment.rule}")
-            tickets.append(self._open_ticket(trigger, assessment.goal, Strength.INFERRED))
+            loop = route_loop(DEFAULT_LOOP, assessment.goal)
+            tickets.append(self._open_ticket(trigger, assessment.goal, Strength.INFERRED, loop))
         return tickets
 
     def relay(self, send: Sender | None = None, only_channel: str = "") -> list[tuple[str, str, str]]:
@@ -210,6 +234,7 @@ class Router:
                 {
                     "ticket": ticket.id,
                     "goal": shorten(ticket.goal),
+                    "loop": ticket.loop,
                     "status": ticket.status.value,
                     "state": reports[-1].state.value if reports else "starting",
                     "question": reports[-1].question if reports and ticket.status is TicketStatus.WAITING else "",
@@ -250,11 +275,11 @@ class Router:
             raise NotAdmittedError(f"trigger {trigger_id} is no longer allowed by the current rules")
         return trigger
 
-    def _open_ticket(self, trigger: Trigger, goal: str, strength: Strength) -> Ticket:
+    def _open_ticket(self, trigger: Trigger, goal: str, strength: Strength, loop: Loop, repo: str = "") -> Ticket:
         mandate = Mandate(self.rules.version, goal, strength, trigger.actor, trigger.source, trigger.id)
         source = self.rules.sources.get(trigger.source)
         channel = source.notify if source is not None and source.notify else trigger.channel
-        ticket, created = self.store.create_ticket(goal, mandate, channel, trigger.thread)
+        ticket, created = self.store.create_ticket(goal, mandate, channel, trigger.thread, loop.value, repo)
         if created:
             self.start_worker(ticket)
         return ticket

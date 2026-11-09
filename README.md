@@ -366,7 +366,7 @@ Settings go under `plugins.entries.hermes-superagent.settings` in each profile's
 
 | Tool or hook | Used for |
 | --- | --- |
-| `superagent_dispatch` | Router opens a ticket from an admitted trigger |
+| `superagent_dispatch` | Router opens a ticket from an admitted trigger. `loop` is required and is one of `kastle-build-loop`, `claude-assisted-loop` or `build-loop`; `repo` is optional. Code overrides the router: a `repo` or goal naming `kastle-mobile` or `kastle` (also as `owner/kastle…`), or a goal holding a `CMPY-<digits>` id, always gets `kastle-build-loop`. Work that reaches a ticket without the router, such as an `act` rule or `superagent ingest`, gets `claude-assisted-loop` under the same override. The ticket stores `loop` and `repo` |
 | `superagent_forward` | Router passes a follow-up to a running or parked ticket, resuming it |
 | `superagent_cancel` | Router stops a ticket when the person who asked says so, and tells them |
 | `superagent_status` | Router lists live tickets |

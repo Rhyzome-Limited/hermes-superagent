@@ -90,6 +90,8 @@ _MIGRATIONS = (
     "ALTER TABLE outbox ADD COLUMN next_attempt_at REAL",
     "ALTER TABLE outbox ADD COLUMN drop_reason TEXT",
     "UPDATE outbox SET failed_at = NULL WHERE sent_at IS NULL AND failed_at IS NOT NULL AND drop_reason IS NULL",
+    "ALTER TABLE tickets ADD COLUMN loop TEXT",
+    "ALTER TABLE tickets ADD COLUMN repo TEXT",
 )
 SEND_RETRY_BASE_SECONDS = 60.0
 SEND_RETRY_CAP_SECONDS = 1800.0
@@ -204,12 +206,14 @@ class Store:
             row = connection.execute("SELECT * FROM triggers WHERE id = ?", (trigger_id,)).fetchone()
         return _trigger_from_row(row) if row else None
 
-    def create_ticket(self, goal: str, mandate: Mandate, channel: str, thread: str) -> tuple[Ticket, bool]:
+    def create_ticket(
+        self, goal: str, mandate: Mandate, channel: str, thread: str, loop: str = "", repo: str = ""
+    ) -> tuple[Ticket, bool]:
         ticket_id = f"tk-{secrets.token_hex(4)}"
         with self._connect() as connection:
             cursor = connection.execute(
-                "INSERT OR IGNORE INTO tickets (id, goal, mandate, channel, status, created_at, trigger_id) "
-                "VALUES (?,?,?,?,?,?,?)",
+                "INSERT OR IGNORE INTO tickets "
+                "(id, goal, mandate, channel, status, created_at, trigger_id, loop, repo) VALUES (?,?,?,?,?,?,?,?,?)",
                 (
                     ticket_id,
                     goal,
@@ -218,12 +222,14 @@ class Store:
                     TicketStatus.OPEN.value,
                     time.time(),
                     mandate.trigger_id,
+                    loop,
+                    repo,
                 ),
             )
             if cursor.rowcount == 1:
                 if thread:
                     connection.execute("INSERT INTO subscriptions VALUES (?,?)", (thread, ticket_id))
-                return Ticket(ticket_id, goal, mandate, channel, TicketStatus.OPEN), True
+                return Ticket(ticket_id, goal, mandate, channel, TicketStatus.OPEN, loop, repo), True
             row = connection.execute("SELECT * FROM tickets WHERE trigger_id = ?", (mandate.trigger_id,)).fetchone()
         return _ticket_from_row(row), False
 
@@ -796,7 +802,15 @@ def _ticket_from_row(row: sqlite3.Row) -> Ticket:
         source=data["source"],
         trigger_id=data["trigger_id"],
     )
-    return Ticket(row["id"], row["goal"], mandate, row["channel"], TicketStatus(row["status"]))
+    return Ticket(
+        row["id"],
+        row["goal"],
+        mandate,
+        row["channel"],
+        TicketStatus(row["status"]),
+        row["loop"] or "",
+        row["repo"] or "",
+    )
 
 
 def _assignment_from_row(row: sqlite3.Row) -> Assignment:

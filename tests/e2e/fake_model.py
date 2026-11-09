@@ -50,7 +50,10 @@ SCRIPTS = {
     ],
     "route": [
         Step("terminal", {"command": "touch {work}/router-ran-{id}"}),
-        Step("superagent_dispatch", {"trigger_id": "{trigger}", "goal": "scenario=routed id=routed-worker"}),
+        Step(
+            "superagent_dispatch",
+            {"trigger_id": "{trigger}", "goal": "scenario=routed id=routed-worker", "loop": "build-loop"},
+        ),
     ],
     "routed": [
         Step("superagent_report", {"state": "progress", "summary": "started {id}"}),
