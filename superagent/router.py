@@ -47,8 +47,9 @@ _MARKDOWN_LINK = re.compile(r"\[([^\[\]\n]*)\]\([^()\n]*\)")
 _GITHUB_ITEM = re.compile(
     r"(?:https?://)?(?:www\.)?github\.com/([\w.-]+/[\w.-]+)/(?:pull|issues)/(\d+)(?:[/#?][^\s)\]]*)?", re.IGNORECASE
 )
-# A full stop, or one of the stops IDNA also reads as a dot.
-_DOTS = ".\u3002\uff0e\uff61"
+# A full stop, one of the stops IDNA also reads as a dot, or a character that compatibility folding (NFKC, as in
+# IDNA) turns into text holding one of them: one dot leader, ellipsis, digit full stops, small full stop and more.
+_DOTS = ".\u2024-\u2026\u2488-\u249b\u3002\u33c2\u33c7\u33d8\ufe12\ufe19\ufe30\ufe52\uff0e\uff61\U0001f100"
 _DOT = f"[{_DOTS}]"
 # A character a host name can hold, by Telegram's rule. Below U+00C0 that is a letter, a digit, "_" or "-" (and the
 # soft hyphen, which IDNA drops). From U+00C0 up it is anything but a space or a dot. Real IDN hosts need this:

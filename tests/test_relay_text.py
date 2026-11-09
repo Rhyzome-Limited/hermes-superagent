@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import time
+import unicodedata
 
 import pytest
 
@@ -74,7 +75,12 @@ def test_links_are_removed(text: str, kept: str) -> None:
     assert line.endswith(kept)
 
 
-DOTS = ".\u3002\uff0e\uff61"
+STOPS = ".\u3002\uff0e\uff61"
+# The stops, and every character whose NFKC form holds one: Python's IDNA codec reads evil\ufe52com as evil.com.
+DOTS = frozenset(
+    ".\u2024\u2025\u2026\u3002\u33c2\u33c7\u33d8\ufe12\ufe19\ufe30\ufe52\uff0e\uff61\U0001f100"
+    + "".join(map(chr, range(0x2488, 0x249C)))
+)
 # IANA's IDN example host under the real ccTLD .bharat (xn--p1b6ci4b4b3a.xn--h2brj9c). Its vowel signs are
 # combining marks, which \w does not match.
 DEVANAGARI_HOST = "\u0909\u0926\u093e\u0939\u0930\u0923.\u092d\u093e\u0930\u0924"
@@ -92,6 +98,14 @@ def in_host(char: str) -> bool:
 def linkable(text: str) -> bool:
     """A dot with a host character on each side is what an auto-linker needs to see a host."""
     return any(text[at] in DOTS and in_host(text[at - 1]) and in_host(text[at + 1]) for at in range(1, len(text) - 1))
+
+
+def test_every_character_that_folds_to_a_stop_is_a_dot() -> None:
+    folds = {chr(code) for code in range(0x110000) if any(s in unicodedata.normalize("NFKC", chr(code)) for s in STOPS)}
+    assert folds == DOTS
+    dot = re.compile(router._DOT)
+    assert [hex(code) for code in range(0x110000) if bool(dot.fullmatch(chr(code))) != (chr(code) in DOTS)] == []
+    assert "evil﹒com".encode("idna") == b"evil.com"
 
 
 def test_the_host_class_follows_telegrams_rule_for_every_code_point() -> None:
@@ -122,6 +136,10 @@ def test_the_host_class_follows_telegrams_rule_for_every_code_point() -> None:
         "see attacker.co\u0301m/x?d=LEAK",
         "see i\u2764.ws/x?d=LEAK",
         "see attack\u00ader.com/x?d=LEAK",
+        "see evil\ufe52com/x?d=LEAK",
+        "see evil\u2024com/x?d=LEAK",
+        "see evil\ufe12com/x?d=LEAK",
+        "see a\u33c2com/x?d=LEAK",
     ],
 )
 def test_a_bare_host_with_a_path_query_or_fragment_is_removed(text: str) -> None:
@@ -145,6 +163,8 @@ def test_a_bare_host_with_a_path_query_or_fragment_is_removed(text: str) -> None
         ("see attackeŕ.com", "see attackeŕ[.]com"),
         ("see attacker‌.com", "see attacker‌[.]com"),
         ("see attacker.cóm", "see attacker[.]cóm"),
+        ("see evil﹒com", "see evil[.]com"),
+        ("see evil⒈com", "see evil[.]com"),
     ],
 )
 def test_any_other_host_keeps_its_name_but_cannot_become_a_link(text: str, kept: str) -> None:
