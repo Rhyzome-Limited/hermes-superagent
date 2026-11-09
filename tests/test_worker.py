@@ -16,6 +16,7 @@ from superagent.worker import (
     IDENTITY_FILENAME,
     SubprocessBackend,
     WorkerStopError,
+    _group_has_live_member,
     _Process,
     _process_tree,
     write_identity,
@@ -247,6 +248,10 @@ import os, signal, subprocess, sys, time
 role, pid_file, stubborn = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
 if role == "leader":
     subprocess.Popen([sys.executable, __file__, "child", pid_file, sys.argv[3]])
+    if sys.argv[3] == "leaderless":
+        while not os.path.exists(pid_file):
+            time.sleep(0.05)
+        sys.exit(0)
 elif role == "child":
     subprocess.Popen([sys.executable, __file__, "grandchild", pid_file, sys.argv[3]])
 else:
@@ -276,11 +281,12 @@ def gone(pid: int, within: float = 5.0) -> bool:
         time.sleep(0.05)
 
 
-def start_tree(tmp_path: Path, stubborn: bool) -> tuple[SubprocessBackend, Assignment, int]:
+def start_tree(tmp_path: Path, stubborn: bool, leaderless: bool = False) -> tuple[SubprocessBackend, Assignment, int]:
     script = tmp_path / "tree.py"
     script.write_text(TREE, encoding="utf-8")
     pid_file = tmp_path / "grandchild.pid"
-    argv = [sys.executable, str(script), "leader", str(pid_file), "1" if stubborn else "0", "{brief}"]
+    mode = "leaderless" if leaderless else "1" if stubborn else "0"
+    argv = [sys.executable, str(script), "leader", str(pid_file), mode, "{brief}"]
     backend = SubprocessBackend(argv, tmp_path / "w")
     started = assignment()
     pid = backend.start(ticket(), started, "token")
@@ -288,8 +294,9 @@ def start_tree(tmp_path: Path, stubborn: bool) -> tuple[SubprocessBackend, Assig
     while not pid_file.exists() and time.time() < deadline:
         time.sleep(0.05)
     grandchild = int(pid_file.read_text())
-    assert os.getsid(grandchild) != os.getsid(pid)
-    assert os.getpgid(grandchild) != os.getpgid(pid)
+    # The worker leads its own session and group, so its pid is both ids, also once it has exited.
+    assert os.getsid(grandchild) != pid
+    assert os.getpgid(grandchild) != pid
     return backend, Assignment(started.id, started.ticket_id, 1, started.status, pid, started.started_at), grandchild
 
 
@@ -314,6 +321,25 @@ def test_stop_kills_a_setsid_grandchild_that_ignores_sigterm(tmp_path: Path, mon
     finally:
         if not gone(grandchild, within=0):
             os.kill(grandchild, 9)
+
+
+def test_stop_kills_a_setsid_grandchild_after_the_leader_has_exited(tmp_path: Path) -> None:
+    # Hermes crashed or ended its turn: the leader is gone, its child lives on in the worker's group, and that child's
+    # own child left with setsid. A cancel or the watchdog's reap must still reach the grandchild.
+    backend, running, grandchild = start_tree(tmp_path, stubborn=False, leaderless=True)
+    group = running.pid or 0
+    try:
+        assert gone(group)
+        assert _group_has_live_member(group)
+        backend.stop(running)
+        assert gone(grandchild)
+        assert (tmp_path / "grandchild.pid.term").exists(), "the grandchild got SIGKILL without a SIGTERM first"
+        assert not _group_has_live_member(group)
+    finally:
+        if not gone(grandchild, within=0):
+            os.kill(grandchild, 9)
+        if _group_has_live_member(group):
+            os.killpg(group, 9)
 
 
 def test_stop_leaves_unrelated_processes_alone(tmp_path: Path) -> None:
@@ -346,3 +372,15 @@ def test_the_tree_follows_children_and_group_mates_and_spares_the_caller() -> No
     assert set(tree) == {100, 101, 102, 103, 105, 201}
     assert tree[102] == "grandchild after setsid"
     assert _process_tree([me], table) == {}
+    assert _process_tree([me], table, groups=[os.getpgrp()]) == {}
+
+
+def test_the_tree_starts_from_the_group_when_the_leader_has_exited() -> None:
+    table = {
+        110: _Process(110, 1, 100, True, "child left in the exited leader's group"),
+        111: _Process(111, 110, 111, True, "grandchild after setsid"),
+        112: _Process(112, 111, 111, True, "its child"),
+        200: _Process(200, 1, 200, True, "unrelated"),
+    }
+    assert _process_tree([100], table) == {}
+    assert set(_process_tree([100], table, groups=[100])) == {110, 111, 112}

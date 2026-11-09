@@ -152,9 +152,11 @@ def _process_table() -> dict[int, _Process]:
     return table
 
 
-def _process_tree(roots: Sequence[int], table: Mapping[int, _Process]) -> dict[int, str]:
-    """Live processes reachable from roots through child processes, in any session or group, and through the other
-    members of each one's process group. Maps pid to start time, so a reused pid is told apart later."""
+def _process_tree(roots: Sequence[int], table: Mapping[int, _Process], groups: Sequence[int] = ()) -> dict[int, str]:
+    """Live processes reachable from roots, and from every member of groups, through child processes, in any session
+    or group, and through the other members of each one's process group. A group outlives its leader, so groups
+    reaches the rest of a worker whose leader has exited. Maps pid to start time, so a reused pid is told apart
+    later."""
     children: dict[int, list[int]] = {}
     members: dict[int, list[int]] = {}
     for process in table.values():
@@ -167,6 +169,9 @@ def _process_tree(roots: Sequence[int], table: Mapping[int, _Process]) -> dict[i
         ancestor = table.get(ancestor.ppid)
     seen: set[int] = set()
     pending = [pid for pid in roots if pid in table]
+    for group in groups:
+        if group not in (0, 1, os.getpgrp()):
+            pending.extend(members.get(group, ()))
     while pending:
         pid = pending.pop()
         if pid in seen or pid <= 1 or pid in spared:
@@ -288,14 +293,15 @@ class SubprocessBackend:
         elif abs(leader_started_at - assignment.started_at) > _PID_START_TOLERANCE_SECONDS:
             return
         # Collect the whole tree before any signal: once a parent dies its children are reparented and lost. Hermes
-        # starts each terminal command in a new session, and a command can start another one with setsid.
-        tree = _process_tree([group], _process_table())
+        # starts each terminal command in a new session, and a command can start another one with setsid. The leader
+        # may have exited already, so the walk also starts from every live member of its group.
+        tree = _process_tree([group], _process_table(), groups=[group])
         self._signal_group(group, signal.SIGTERM)
         _signal_each(tree, signal.SIGTERM)
         if _tree_exited_within(group, tree, _STOP_GRACE_SECONDS):
             return
         table = _process_table()
-        tree = _process_tree([group, *_still_running(tree, table)], table)
+        tree = _process_tree([group, *_still_running(tree, table)], table, groups=[group])
         self._signal_group(group, signal.SIGKILL)
         _signal_each(tree, signal.SIGKILL)
         if not _tree_exited_within(group, tree, _KILL_GRACE_SECONDS):
