@@ -13,13 +13,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from .agents import redact
 from .brief import BriefSettings, build_brief
 from .config import DB_FILENAME, WORKDIRS_DIRNAME, Config, load_config
 from .connectors import Connector, build_connector
 from .domain import Ticket
 from .ledger import Ledger
 from .polling import SourceWarning, poll_sources
-from .router import Assessor, Router, Sender, chat_safe
+from .router import Assessor, Router, Sender, chat_safe, strip_links
 from .store import Store, split_message
 from .watchdog import CheckResult, DriftJudge, check_once
 from .worker import SubprocessBackend
@@ -72,8 +73,9 @@ def argv_sender(argv: tuple[str, ...]) -> Sender | None:
         return None
 
     def send(channel: str, text: str) -> None:
-        # The one place every outbound text passes, so it is neutralised here whatever wrote the outbox row.
-        values = {"channel": channel, "text": chat_safe(text)}
+        # The one place every outbound text passes, so it is neutralised here whatever wrote the outbox row: no
+        # secret, nothing a chat app turns into a link or an attachment.
+        values = {"channel": channel, "text": chat_safe(strip_links(redact(text)))}
         rendered = [_SEND_PLACEHOLDER.sub(lambda match: values[match.group(1)], part) for part in argv]
         subprocess.run(rendered, check=True, timeout=_SEND_TIMEOUT_SECONDS, capture_output=True)
 

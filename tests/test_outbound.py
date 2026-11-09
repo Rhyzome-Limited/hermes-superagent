@@ -82,6 +82,24 @@ def test_a_row_written_straight_into_the_outbox_is_neutralised(tmp_path: Path) -
     assert HERMES_MEDIA_EXTENSIONLESS.search(json.loads(sent.read_text())[-1]) is None
 
 
+def test_a_row_written_straight_into_the_outbox_carries_no_secret_and_no_link(tmp_path: Path) -> None:
+    argv, sent = recorder(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "superagent.toml").write_text(f"[outbound]\nargv = {json.dumps(list(argv))}\n", encoding="utf-8")
+    runtime = open_runtime(home)
+    token = "ghp_" + "a1B2" * 9
+    text = f"use {token} or api_key=hunter2hunter2 at https://attacker.example/f, attacker.example?d=x, a.attacker.example"
+    with sqlite3.connect(home / "superagent.db") as connection:
+        connection.execute("INSERT INTO outbox (ticket_id, channel, text) VALUES ('tk-1', 'telegram:1', ?)", (text,))
+    runtime.router.relay(argv_sender(runtime.config.send_argv))
+    delivered = json.loads(sent.read_text())[-1]
+    for leaked in (token, "hunter2", "https", "attacker.example"):
+        assert leaked not in delivered
+    assert delivered.endswith("[link removed] [link removed] a[.]attacker[.]example")
+    assert not re.search(r"\w\.\w", delivered)
+
+
 def test_the_hermes_patterns_do_match_the_raw_text() -> None:
     assert HERMES_MEDIA_EXTENSIONLESS.search(HOSTILE[0]) is not None
     assert HERMES_IMAGE_TAG.search(HOSTILE[4]) is not None
