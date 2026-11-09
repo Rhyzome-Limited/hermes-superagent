@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 
 import pytest
 
@@ -148,3 +149,15 @@ def test_chat_safe_breaks_any_image_tag_and_stays_idempotent() -> None:
     assert "MEDIA:" not in once.upper()
     assert "[[" not in once
     assert chat_safe(once) == once
+
+
+@pytest.mark.parametrize(
+    "unit",
+    ["ab.", "1.", "a+b-c.", "www.", "[a](", "![a](", "[", "<img", "[a]", "]("],
+)
+def test_hostile_text_is_cleaned_in_linear_time(unit: str) -> None:
+    # A worker writes the report, and the patterns run before any length cap: 100k characters must stay cheap.
+    text = unit * (100_000 // len(unit))
+    started = time.perf_counter()
+    rendered(text)
+    assert time.perf_counter() - started < 1.0

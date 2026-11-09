@@ -40,16 +40,22 @@ _ATTACHMENT_TAG = re.compile(r"media:", re.IGNORECASE)
 _DIRECTIVE_OPENING = re.compile(r"\[(?=\[)")
 _MENTION = re.compile(r"@(?=everyone|here)|<@|<#")
 _IMAGE_OPENING = re.compile(r"!(?=\[)")
-_IMAGE_TAG = re.compile(r"!\[[^\]\n]*\]\([^)\n]*\)|<img\b[^>]*>", re.IGNORECASE)
-_MARKDOWN_LINK = re.compile(r"\[([^\]\n]*)\]\([^)\n]*\)")
+# No part runs past the next opening bracket, so a run of unclosed ones costs linear time. A nested image or link
+# these miss still loses its URL to _URL.
+_IMAGE_TAG = re.compile(r"!\[[^\[\]\n]*\]\([^()\n]*\)|<img\b[^<>]*>", re.IGNORECASE)
+_MARKDOWN_LINK = re.compile(r"\[([^\[\]\n]*)\]\([^()\n]*\)")
 _GITHUB_ITEM = re.compile(
     r"(?:https?://)?(?:www\.)?github\.com/([\w.-]+/[\w.-]+)/(?:pull|issues)/(\d+)(?:[/#?][^\s)\]]*)?", re.IGNORECASE
 )
 # A full stop, or one of the stops IDNA also reads as a dot.
 _DOT = r"[.\u3002\uff0e\uff61]"
-# A host as chat apps auto-link it without a scheme: attacker.example, a.b.co.uk, README.md, 10.0.0.1.
-_HOST = rf"(?<![\w-])(?:(?:[\w-]+{_DOT})+[^\W\d_][\w-]+|\d{{1,3}}(?:{_DOT}\d{{1,3}}){{3}})(?![\w-])"
-_URL = re.compile(rf"(?:\b[a-z][a-z0-9+.-]*://|\bwww\.)\S+|{_HOST}(?::\d+)?[/?#]\S*", re.IGNORECASE)
+# A host as chat apps auto-link it without a scheme: attacker.example, a.b.co.uk, README.md, 10.0.0.1. It starts
+# only at the first label of a dotted run, which covers any host inside the run and keeps the match linear.
+_HOST = (
+    rf"(?<![\w-])(?<![\w-]{_DOT})"
+    rf"(?:(?:[\w-]+{_DOT})+[^\W\d_][\w-]+|\d{{1,3}}(?:{_DOT}\d{{1,3}}){{3}})(?![\w-])"
+)
+_URL = re.compile(rf"(?:\b[a-z][a-z0-9+.-]{{0,31}}://|\bwww\.)\S+|{_HOST}(?::\d+)?[/?#]\S*", re.IGNORECASE)
 _BARE_HOST = re.compile(_HOST)
 _HOST_DOT = re.compile(_DOT)
 # A Kastle repo named on its own or as owner/name: a hyphen continues a repo name, so kastle-push is another repo.
