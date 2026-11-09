@@ -40,6 +40,9 @@ _ATTACHMENT_TAG = re.compile(r"media:", re.IGNORECASE)
 _DIRECTIVE_OPENING = re.compile(r"\[(?=\[)")
 _MENTION = re.compile(r"@(?=everyone|here)|<@|<#")
 _IMAGE_OPENING = re.compile(r"!(?=\[)")
+# Hermes's Telegram formatter builds a link from any [text](url), including one whose text spans lines or whose
+# URL holds parentheses, which _MARKDOWN_LINK leaves alone. Splitting "](" means no link can form downstream.
+_LINK_JOIN = re.compile(r"\](?=\()")
 # No part runs past the next opening bracket, so a run of unclosed ones costs linear time. A nested image or link
 # these miss still loses its URL to _URL.
 _IMAGE_TAG = re.compile(r"!\[[^\[\]\n]*\]\([^()\n]*\)|<img\b[^<>]*>", re.IGNORECASE)
@@ -353,7 +356,8 @@ class Router:
 
 def chat_safe(text: str) -> str:
     quiet = _MENTION.sub(lambda match: match.group(0)[0] + "\u200b" + match.group(0)[1:], text)
-    return _IMAGE_OPENING.sub("! ", _DIRECTIVE_OPENING.sub("[ ", _ATTACHMENT_TAG.sub("media ", quiet)))
+    unlinked = _LINK_JOIN.sub("] ", quiet)
+    return _IMAGE_OPENING.sub("! ", _DIRECTIVE_OPENING.sub("[ ", _ATTACHMENT_TAG.sub("media ", unlinked)))
 
 
 def strip_links(text: str) -> str:

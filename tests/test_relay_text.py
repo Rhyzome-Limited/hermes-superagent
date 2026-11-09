@@ -228,6 +228,22 @@ def test_progress_still_stays_quiet() -> None:
     assert _render_report(Report("as-1", "tk-1", ReportState.PROGRESS, "https://x.example", "", 0.0), GOAL) is None
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "see [a\nb](http:3232235777/?d=LEAK)",
+        "see [x](http:evil(b)/?d=LEAK)",
+        "see [x]](tg:resolve?domain=LEAK)",
+    ],
+)
+def test_no_markdown_link_survives_for_the_formatter_to_build(text: str) -> None:
+    # Hermes's Telegram formatter turns [text](url) into a link even with the text across lines or parentheses in
+    # the URL, so the shape itself must not reach it.
+    line = rendered(text)
+    assert "](" not in line
+    assert chat_safe(line) == line
+
+
 def test_chat_safe_breaks_any_image_tag_and_stays_idempotent() -> None:
     once = chat_safe("look ![x](https://e.example/p.png) MEDIA:/etc/hosts [[as_document]] @everyone")
     assert "![" not in once
