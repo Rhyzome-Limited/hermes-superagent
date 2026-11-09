@@ -317,6 +317,7 @@ The rendered prompt becomes the goal, the comment's author is checked against `a
 | `[sources.<name>] bots` | `[]` | Bots whose events can become candidates on a `candidate` source |
 | `[sources.<name>] pass_strangers` | `false` | Lets strangers' thread messages reach a worker, framed and with no authority |
 | `[sources.<name>] notify` | none | Channel that gets this source's results and escalations instead of the event's own, such as `discord:123` |
+| `[sources.cli]` | off | Lets a router chat in the Hermes CLI dispatch: `hermes -p router chat` in the classic interface, `-q` included. Each turn becomes trigger `cli:<session>:<n>` from the OS user running Hermes, read from the OS and never from the environment or the text, gated by `policy` and `allow` (OS user names) like any source, and offered to the router's model in that same turn. Its tickets' results go to `notify`, or nowhere when it's unset. The TUI and desktop surfaces aren't taken, and a gateway platform named `cli` is dropped |
 | `[sources."webhook:<route>"] via_router` | `false` | Lets the router's model read this webhook's admitted events instead of starting work directly. Authors still go through `allow` |
 | `[[semantic]] name`, `text` | required | A team rule, written in plain language |
 | `[[semantic]] mode` | `record` | `record` only logs, `act` opens a ticket |

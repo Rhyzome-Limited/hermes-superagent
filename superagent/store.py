@@ -141,6 +141,8 @@ def split_message(text: str, limit: int = MESSAGE_LIMIT) -> list[str]:
 
 
 def _queue(connection: sqlite3.Connection, ticket_id: str, channel: str, text: str) -> None:
+    if not channel:
+        return  # A ticket from a source with no channel, such as the CLI without [sources.cli] notify, tells nobody.
     connection.executemany(
         "INSERT INTO outbox (ticket_id, channel, text) VALUES (?,?,?)",
         [(ticket_id, channel, part) for part in split_message(text)],
@@ -199,6 +201,14 @@ class Store:
                 ),
             )
             return cursor.rowcount == 1
+
+    def next_trigger_number(self, prefix: str) -> int:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id FROM triggers WHERE substr(id, 1, ?) = ?", (len(prefix), prefix)
+            ).fetchall()
+        numbers = [int(tail) for row in rows if (tail := row["id"][len(prefix) :]).isdigit()]
+        return max(numbers, default=0) + 1
 
     def admission_of(self, trigger_id: str) -> Admission | None:
         with self._connect() as connection:
