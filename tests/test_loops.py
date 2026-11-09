@@ -141,6 +141,19 @@ def test_a_database_from_before_loops_is_upgraded(tmp_path: Path) -> None:
     assert Store(path).get_ticket("tk-old").goal == "g"
 
 
+def test_a_database_whose_version_older_code_reset_still_opens(tmp_path: Path) -> None:
+    # The upstream pin writes user_version = 3 whenever it opens the file, even after this code migrated it.
+    path = tmp_path / "superagent.db"
+    Store(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA user_version = 3")
+    store = Store(path)
+    assert sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0] > 3
+    columns = {row[1] for row in sqlite3.connect(path).execute("PRAGMA table_info(tickets)")}
+    assert {"loop", "repo", "scope_class", "queued_at"} <= columns
+    assert store.live_tickets() == []
+
+
 SAFE_CONFIG = f"""
 [sources.discord]
 policy = "explicit_only"
