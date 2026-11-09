@@ -208,22 +208,17 @@ def _gateway_pids() -> set[int]:
 
 
 def _cwds() -> dict[int, str]:
-    if Path("/proc/self/cwd").exists():
-        cwds = {}
-        for entry in Path("/proc").iterdir():
-            if entry.name.isdigit():
-                try:
-                    cwds[int(entry.name)] = os.readlink(entry / "cwd")
-                except OSError:
-                    continue
-        return cwds
-    result = subprocess.run(
-        ["lsof", "-a", "-u", str(os.getuid()), "-d", "cwd", "-Fn"],
-        capture_output=True,
-        text=True,
-        check=False,
-        env={**os.environ, "LC_ALL": "C", "PATH": os.environ.get("PATH", "") + ":/usr/sbin:/usr/bin"},
-    )
+    # ponytail: lsof only (macOS ships it, so do the usual Linux images); without it a stop fails loudly.
+    try:
+        result = subprocess.run(
+            ["lsof", "-a", "-u", str(os.getuid()), "-d", "cwd", "-Fn"],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={**os.environ, "LC_ALL": "C", "PATH": os.environ.get("PATH", "") + ":/usr/sbin:/usr/bin"},
+        )
+    except OSError as error:
+        raise WorkerStopError(f"could not list process directories: {error}") from error
     cwds, pid = {}, None
     for line in result.stdout.splitlines():
         if line.startswith("p") and line[1:].isdigit():
