@@ -64,7 +64,8 @@ _HOST = (
     rf"(?:(?:{_HOST_CHAR}+{_DOT})+(?![\d_-]){_HOST_CHAR}{_HOST_CHAR}+|\d{{1,3}}(?:{_DOT}\d{{1,3}}){{3}})"
     rf"(?!{_HOST_CHAR})"
 )
-_URL = re.compile(rf"(?:\b[a-z][a-z0-9+.-]{{0,31}}://|\bwww\.)\S+|{_HOST}(?::\d+)?[/?#]\S*", re.IGNORECASE)
+# A scheme counts wherever it starts, even glued to a word (x_tg://, 1http://3232235777/), whose host may hold no dot.
+_URL = re.compile(rf"(?:[a-z][a-z0-9+.-]{{0,31}}://|\bwww\.)\S+|{_HOST}(?::\d+)?[/?#]\S*", re.IGNORECASE)
 _BARE_HOST = re.compile(_HOST)
 _HOST_DOT = re.compile(_DOT)
 # A Kastle repo named on its own or as owner/name: a hyphen continues a repo name, so kastle-push is another repo.

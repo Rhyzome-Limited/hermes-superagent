@@ -75,6 +75,22 @@ def test_links_are_removed(text: str, kept: str) -> None:
     assert line.endswith(kept)
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "see éhttp://3232235777/?d=LEAK",
+        "see x_http://[2001:db8::1]/?d=LEAK",
+        "see 1https://localhost:8080/?d=LEAK",
+        "see x_tg://resolve?domain=LEAK",
+        # 34 scheme characters: longer than a scheme, shorter than a redacted token.
+        "see " + "a" * 30 + "http://3232235777/?d=LEAK",
+    ],
+)
+def test_a_scheme_glued_to_a_word_is_still_a_link(text: str) -> None:
+    line = rendered(text)
+    assert "LEAK" not in line and "://" not in line
+
+
 STOPS = ".\u3002\uff0e\uff61"
 # The stops, and every character whose NFKC form holds one: Python's IDNA codec reads evil\ufe52com as evil.com.
 DOTS = frozenset(
@@ -211,7 +227,10 @@ def test_chat_safe_breaks_any_image_tag_and_stays_idempotent() -> None:
 
 @pytest.mark.parametrize(
     "unit",
-    ["ab.", "1.", "a+b-c.", "www.", "[a](", "![a](", "[", "<img", "[a]", "](", "हरण.", "á.", "‍."],
+    [
+        *("ab.", "1.", "a+b-c.", "www.", "[a](", "![a](", "[", "<img", "[a]", "]("),
+        *("\u0939\u0930\u0923.", "a\u0301.", "\u200d.", "a", "a:/"),
+    ],
 )
 def test_hostile_text_is_cleaned_in_linear_time(unit: str) -> None:
     # A worker writes the report, and the patterns run before any length cap: 100k characters must stay cheap.
