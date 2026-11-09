@@ -61,10 +61,22 @@ def render_brief(ticket: Ticket, context: str = "") -> str:
     )
 
 
-def write_identity(workdir: Path, ticket_id: str, assignment_id: str, token: str, attempt: int) -> None:
+def write_identity(
+    workdir: Path, ticket_id: str, assignment_id: str, token: str, attempt: int, loop: str = "", home: str = ""
+) -> None:
+    """Write the worker's credentials and what its tools may read: its ticket, loop and the absolute shared home.
+    Readers take the fields they need and never print the file, since it holds the token."""
     descriptor = os.open(workdir / IDENTITY_FILENAME, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    identity = {
+        "assignment": assignment_id,
+        "ticket": ticket_id,
+        "token": token,
+        "attempt": attempt,
+        "loop": loop,
+        "home": home,
+    }
     with os.fdopen(descriptor, "w", encoding="utf-8") as file:
-        json.dump({"assignment": assignment_id, "ticket": ticket_id, "token": token, "attempt": attempt}, file)
+        json.dump(identity, file)
 
 
 def _process_started_at(pid: int) -> float | None:
@@ -142,7 +154,8 @@ class SubprocessBackend:
         workdir.mkdir(parents=True, exist_ok=True)
         brief = workdir / "brief.md"
         brief.write_text(render_brief(ticket, context), encoding="utf-8")
-        write_identity(workdir, ticket.id, assignment.id, token, assignment.attempt)
+        home = str(self.workdir_root.resolve().parent)
+        write_identity(workdir, ticket.id, assignment.id, token, assignment.attempt, ticket.loop, home)
         env = {name: os.environ[name] for name in _INHERITED_ENV if name in os.environ}
         env.update(self.extra_env)
         values = {"brief": str(brief), "loop": ticket.loop, "ticket": ticket.id}

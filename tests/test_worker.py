@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from superagent.domain import Assignment, AssignmentStatus, Mandate, Strength, Ticket, TicketStatus
+from superagent.reporting import identity_from_workdir
 from superagent.worker import IDENTITY_FILENAME, SubprocessBackend, WorkerStopError, write_identity
 
 STUBBORN = (
@@ -194,10 +195,31 @@ def test_goal_never_reaches_argv(tmp_path: Path) -> None:
 
 
 def test_identity_is_written_for_the_worker_only(tmp_path: Path) -> None:
-    write_identity(tmp_path, "tk-1", "as-1", "secret", 2)
+    write_identity(tmp_path, "tk-1", "as-1", "secret", 2, "build-loop", "/sa/home")
     identity = tmp_path / IDENTITY_FILENAME
     assert stat.S_IMODE(identity.stat().st_mode) == 0o600
-    assert json.loads(identity.read_text()) == {"assignment": "as-1", "ticket": "tk-1", "token": "secret", "attempt": 2}
+    assert json.loads(identity.read_text()) == {
+        "assignment": "as-1",
+        "ticket": "tk-1",
+        "token": "secret",
+        "attempt": 2,
+        "loop": "build-loop",
+        "home": "/sa/home",
+    }
+
+
+def test_identity_names_the_loop_and_the_absolute_shared_home(tmp_path: Path) -> None:
+    home = tmp_path / "sa-home"
+    backend = SubprocessBackend([sys.executable, "-c", "pass", "{brief}"], home / "workers")
+    mandate = Mandate("v1", "a task", Strength.EXPLICIT, "alice", "chat", "t1")
+    kastle = Ticket("tk-1", "a task", mandate, "chat:1", TicketStatus.OPEN, "kastle-build-loop")
+    backend.start(kastle, assignment(), "token")
+    workdir = home / "workers" / "tk-1" / "as-1"
+    identity = json.loads((workdir / IDENTITY_FILENAME).read_text())
+    assert identity["loop"] == "kastle-build-loop"
+    assert identity["home"] == str(home.resolve())
+    assert Path(identity["home"]).is_absolute()
+    assert identity_from_workdir(workdir).db_path.parent.resolve() == Path(identity["home"])
 
 
 def test_last_output_is_the_tail_of_the_worker_log_without_terminal_codes(tmp_path: Path) -> None:

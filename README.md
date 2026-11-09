@@ -271,7 +271,7 @@ Remove `terminal` and `file` from the router with `hermes -p router tools`, keep
 */5 * * * * hermes -p watchdog superagent tick
 ```
 
-Every message names its task, as in `Done [fix the login redirect · tk-1a2b]: …`, so replies can't get mixed up. To stop a task, tell the router, or run `hermes -p watchdog superagent cancel <ticket>`. Questions, results, failures and escalations reach people on the next tick. Progress stays in the store. A worker is whichever session runs in its own worker directory, so the worker profile refuses any other session and isn't for general chat.
+Every message names its task, as in `Done [fix the login redirect · tk-1a2b]: …`, so replies can't get mixed up. To stop a task, tell the router, or run `hermes -p watchdog superagent cancel <ticket>`. Questions, results, failures and escalations reach people on the next tick. Progress stays in the store. A worker is whichever session runs in its own worker directory, so the worker profile refuses any other session and isn't for general chat. That directory holds `.superagent-identity.json` (mode 0600) with `assignment`, `ticket`, `token`, `attempt`, `loop` and `home`, the absolute shared directory. Scripts a worker runs read only the fields they need, such as `jq -r .ticket`, and never print the file, since it holds the token.
 
 Hermes defers plugin tools behind `tool_call` by default, and that works. Set `tools.tool_search.enabled: off` in a profile to hand its model the tools directly.
 
