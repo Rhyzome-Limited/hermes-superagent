@@ -61,12 +61,10 @@ class NoDriftJudge:
 def collect_evidence(store: Store, backend: WorkerBackend, assignment: Assignment, policy: WatchdogPolicy) -> Evidence:
     reports = tuple(store.reports_for(assignment.id))
     activity = store.recent_activity(assignment.id, policy.repeated_call_limit)
-    moments = [assignment.started_at]
-    if reports:
-        moments.append(reports[-1].at)
-    if activity:
-        moments.append(activity[-1][1])
-    last_seen = max(moments)
+    # Silence counts from the last report, not the last tool call: a worker that polls a background run (Opus, or
+    # a hung command) with process_manage gets a new result every time, so tool calls alone would keep it "alive"
+    # forever. Plan 2.8 nudges a worker that does not report; the worker skill reports at least every 5 minutes.
+    last_seen = reports[-1].at if reports else assignment.started_at
     fingerprints = {fingerprint for fingerprint, _ in activity}
     repeated = len(activity) if len(fingerprints) == 1 else 0
     last_checked = store.last_watchdog_at(assignment.id)
