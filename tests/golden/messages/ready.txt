@@ -1,0 +1,6 @@
+✅ Done · Guards CI fix · tk-ee69ce72
+The relay-guard tests now run on macOS. All 3 CI jobs pass.
+• Changed the CI file only. No test changed.
+Checks: relay-guard ✓ · wiki-mirror ✓ · shell syntax ✓
+PR #4 is ready to merge.
+You: review and merge PR #4.

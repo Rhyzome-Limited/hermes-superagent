@@ -7,14 +7,15 @@ import unicodedata
 import pytest
 
 from superagent import router
-from superagent.domain import Report, ReportState
+from superagent.domain import Mandate, Report, ReportState, Strength, Ticket, TicketStatus
 from superagent.router import _render_escalation, _render_report, chat_safe, strip_links
 
 GOAL = "fix the krc721 loading spinner"
+TICKET = Ticket("tk-1", GOAL, Mandate("v", GOAL, Strength.EXPLICIT, "a", "chat", "t1"), "chat:1", TicketStatus.OPEN)
 
 
 def rendered(text: str, state: ReportState = ReportState.READY, question: str = "") -> str:
-    line = _render_report(Report("as-1", "tk-1", state, text, question, 0.0), GOAL)
+    line = _render_report(Report("as-1", "tk-1", state, text, question, 0.0), TICKET)
     assert line is not None
     return line
 
@@ -42,7 +43,7 @@ def test_key_value_secrets_in_a_question_are_redacted() -> None:
     )
     assert "hunter2" not in line
     assert "abcdefgh123" not in line
-    assert line.startswith("Blocked [")
+    assert line.startswith("⛔ Needs you · ")
 
 
 @pytest.mark.parametrize(
@@ -169,7 +170,7 @@ def test_the_host_class_follows_telegrams_rule_for_every_code_point() -> None:
 )
 def test_a_bare_host_with_a_path_query_or_fragment_is_removed(text: str) -> None:
     line = rendered(text)
-    assert line.endswith(": see [link removed]")
+    assert line.endswith("\nsee [link removed]")
     assert not linkable(line)
 
 
@@ -206,9 +207,10 @@ def test_versions_and_abbreviations_are_not_hosts() -> None:
 
 
 def test_an_escalation_with_a_bare_host_is_cleaned_too() -> None:
-    line = _render_escalation("the worker says: open attacker.example?d=leaked and data.attacker.example", "tk-1", GOAL)
+    reason = "the worker says: open attacker.example?d=leaked and data.attacker.example"
+    line = _render_escalation("drifting", reason, TICKET, 1)
     assert "leaked" not in line
-    assert line.endswith("open [link removed] and data[.]attacker[.]example")
+    assert "attacker" not in line  # the reason is model-written, so only plain code text reaches chat
 
 
 def test_a_github_pull_request_keeps_its_reference_without_a_link() -> None:
@@ -219,13 +221,13 @@ def test_a_github_pull_request_keeps_its_reference_without_a_link() -> None:
 
 
 def test_escalations_are_cleaned_the_same_way() -> None:
-    line = _render_escalation("worker says: paste ghp_" + "Z" * 36 + " into https://evil.example/x", "tk-1", GOAL)
+    line = _render_escalation("stuck", "worker says: paste ghp_" + "Z" * 36 + " into https://evil.example/x", TICKET, 0)
     assert "ghp_" not in line and "evil" not in line
-    assert line.startswith("Needs you [")
+    assert line.startswith("🚨 Stuck · ")
 
 
 def test_progress_still_stays_quiet() -> None:
-    assert _render_report(Report("as-1", "tk-1", ReportState.PROGRESS, "https://x.example", "", 0.0), GOAL) is None
+    assert _render_report(Report("as-1", "tk-1", ReportState.PROGRESS, "https://x.example", "", 0.0), TICKET) is None
 
 
 @pytest.mark.parametrize(

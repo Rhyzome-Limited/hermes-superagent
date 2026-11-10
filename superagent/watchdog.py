@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass
 from typing import Protocol
 
-from .domain import Assignment, AssignmentStatus, RepairAction, Report, Ticket, Verdict
+from .domain import Assignment, AssignmentStatus, RepairAction, Report, ReportFields, Ticket, Verdict
 from .framing import frame_untrusted
 from .router import Router
 from .store import Store
@@ -189,8 +189,11 @@ def _repair_orphan(router: Router, ticket: Ticket, policy: WatchdogPolicy) -> Ch
 
 def _park_silent_exit(router: Router, ticket: Ticket, assignment: Assignment, output: str) -> CheckResult | None:
     last_words = output[-_LAST_WORDS_CHARS:]
-    question = f"The worker exited without a final report. Its last output: {last_words}\nShould it run again?"
-    if not router.store.park_silent_exit(assignment.id, f"exited without a final report: {last_words}", question):
+    summary = f"exited without a final report: {last_words}"
+    fields = ReportFields(
+        outcome="It stopped without a final report.", topic="Run again", details=summary, approve=True
+    )
+    if not router.store.park_silent_exit(assignment.id, summary, "Should the worker run again?", fields):
         return None
     reason = "worker exited without a final report, a person decides whether to run it again"
     router.store.add_watchdog_event(assignment.id, ticket.id, Verdict.STUCK.value, RepairAction.PARK, reason)

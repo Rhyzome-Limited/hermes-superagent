@@ -61,7 +61,12 @@ def test_a_cli_turn_from_an_allowed_os_user_is_offered_and_can_be_dispatched(tmp
     trigger = store_of(tmp_path).get_trigger("cli:20261109_101500_ab12:1")
     assert trigger is not None and (trigger.source, trigger.actor) == ("cli", ME)
     dispatch = ctx.tools["superagent_dispatch"]["handler"]
-    call = {"trigger_id": "cli:20261109_101500_ab12:1", "goal": "Add a --dry-run flag", "loop": "build-loop"}
+    call = {
+        "trigger_id": "cli:20261109_101500_ab12:1",
+        "goal": "Add a --dry-run flag",
+        "loop": "build-loop",
+        "title": "Dry run flag",
+    }
     answer = json.loads(dispatch(call))
     assert answer["status"] == "open"
     assert store_of(tmp_path).get_ticket(answer["ticket"]).mandate.actor == ME
@@ -82,7 +87,7 @@ def test_an_os_user_not_on_the_list_gets_no_trigger_whatever_the_text_says(tmp_p
     assert store.admission_of("cli:20261109_101500_ab12:1") is Admission.IGNORE
     answer = json.loads(
         ctx.tools["superagent_dispatch"]["handler"](
-            {"trigger_id": "cli:20261109_101500_ab12:1", "goal": "x", "loop": "build-loop"}
+            {"trigger_id": "cli:20261109_101500_ab12:1", "goal": "x", "loop": "build-loop", "title": "X"}
         )
     )
     assert "not admitted" in answer["error"]

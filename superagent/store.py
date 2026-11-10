@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+import os
 import secrets
 import sqlite3
 import time
@@ -15,11 +17,13 @@ from .domain import (
     Admission,
     Assignment,
     AssignmentStatus,
+    Check,
     DigestItem,
     Loop,
     Mandate,
     RepairAction,
     Report,
+    ReportFields,
     ReportState,
     ScopeClass,
     Strength,
@@ -96,11 +100,17 @@ _MIGRATIONS = (
     "ALTER TABLE tickets ADD COLUMN repo TEXT",
     "ALTER TABLE tickets ADD COLUMN scope_class TEXT",
     "ALTER TABLE tickets ADD COLUMN queued_at REAL",
+    "ALTER TABLE tickets ADD COLUMN title TEXT",
+    "ALTER TABLE tickets ADD COLUMN done_when TEXT",
+    "ALTER TABLE reports ADD COLUMN fields TEXT",
+    "ALTER TABLE reports ADD COLUMN style_fail INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE assignments ADD COLUMN style_refusals INTEGER NOT NULL DEFAULT 0",
 )
 SEND_RETRY_BASE_SECONDS = 60.0
 SEND_RETRY_CAP_SECONDS = 1800.0
 MESSAGE_LIMIT = 1900
 ALERT_TICKET = "alert"
+RELAY_LOCK_FILENAME = "relay.lock"
 SEND_FIRST_RETRY_SECONDS = 30.0
 
 
@@ -226,29 +236,44 @@ class Store:
         return _trigger_from_row(row) if row else None
 
     def create_ticket(
-        self, goal: str, mandate: Mandate, channel: str, thread: str, loop: str = "", repo: str = ""
+        self,
+        goal: str,
+        mandate: Mandate,
+        channel: str,
+        thread: str,
+        loop: str = "",
+        repo: str = "",
+        *,
+        title: str = "",
+        done_when: str = "",
     ) -> tuple[Ticket, bool]:
         ticket_id = f"tk-{secrets.token_hex(4)}"
+        now = time.time()
         with self._connect() as connection:
             cursor = connection.execute(
-                "INSERT OR IGNORE INTO tickets "
-                "(id, goal, mandate, channel, status, created_at, trigger_id, loop, repo) VALUES (?,?,?,?,?,?,?,?,?)",
+                "INSERT OR IGNORE INTO tickets (id, goal, mandate, channel, status, created_at, trigger_id, loop, "
+                "repo, title, done_when) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     ticket_id,
                     goal,
                     json.dumps(asdict(mandate)),
                     channel,
                     TicketStatus.OPEN.value,
-                    time.time(),
+                    now,
                     mandate.trigger_id,
                     loop,
                     repo,
+                    title,
+                    done_when,
                 ),
             )
             if cursor.rowcount == 1:
                 if thread:
                     connection.execute("INSERT INTO subscriptions VALUES (?,?)", (thread, ticket_id))
-                return Ticket(ticket_id, goal, mandate, channel, TicketStatus.OPEN, loop, repo), True
+                ticket = Ticket(
+                    ticket_id, goal, mandate, channel, TicketStatus.OPEN, loop, repo, "", title, done_when, now
+                )
+                return ticket, True
             row = connection.execute("SELECT * FROM tickets WHERE trigger_id = ?", (mandate.trigger_id,)).fetchone()
         return _ticket_from_row(row), False
 
@@ -362,7 +387,9 @@ class Store:
             )
             return cursor.rowcount == 1
 
-    def park_silent_exit(self, assignment_id: str, summary: str, question: str) -> bool:
+    def park_silent_exit(
+        self, assignment_id: str, summary: str, question: str, fields: ReportFields | None = None
+    ) -> bool:
         now = time.time()
         with self._connect() as connection:
             row = connection.execute("SELECT ticket_id FROM assignments WHERE id = ?", (assignment_id,)).fetchone()
@@ -373,8 +400,9 @@ class Store:
             if row is None or cursor.rowcount != 1:
                 return False
             connection.execute(
-                "INSERT INTO reports (assignment_id, ticket_id, state, summary, question, at) VALUES (?,?,?,?,?,?)",
-                (assignment_id, row["ticket_id"], ReportState.BLOCKED.value, summary, question, now),
+                "INSERT INTO reports (assignment_id, ticket_id, state, summary, question, at, fields) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (assignment_id, row["ticket_id"], ReportState.BLOCKED.value, summary, question, now, _json(fields)),
             )
             connection.execute(
                 "UPDATE tickets SET status = ? WHERE id = ? AND status = ?",
@@ -428,21 +456,21 @@ class Store:
         summary: str,
         question: str = "",
         scope_class: str = "",
+        *,
+        fields: ReportFields | None = None,
+        style_fail: bool = False,
     ) -> Report:
         now = time.time()
         with self._connect() as connection:
-            row = connection.execute("SELECT * FROM assignments WHERE id = ?", (assignment_id,)).fetchone()
-            if row is None or not secrets.compare_digest(row["token_hash"], hash_token(token)):
-                raise StaleAssignmentError(f"bad credentials for assignment {assignment_id}")
-            if row["status"] != AssignmentStatus.RUNNING.value:
-                raise StaleAssignmentError(f"assignment {assignment_id} has ended, report refused")
+            row = _running_assignment(connection, assignment_id, token)
             if scope_class:
                 _set_scope_class(connection, row["ticket_id"], scope_class)
             summary = summary[:MAX_REPORT_CHARS]
             question = question[:MAX_REPORT_CHARS]
             connection.execute(
-                "INSERT INTO reports (assignment_id, ticket_id, state, summary, question, at) VALUES (?,?,?,?,?,?)",
-                (assignment_id, row["ticket_id"], state.value, summary, question, now),
+                "INSERT INTO reports (assignment_id, ticket_id, state, summary, question, at, fields, style_fail) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (assignment_id, row["ticket_id"], state.value, summary, question, now, _json(fields), int(style_fail)),
             )
             if state in FINAL_REPORT_STATES or state is ReportState.BLOCKED:
                 connection.execute(
@@ -451,7 +479,19 @@ class Store:
                 )
                 status = TicketStatus.WAITING if state is ReportState.BLOCKED else TicketStatus.ENDED
                 connection.execute("UPDATE tickets SET status = ? WHERE id = ?", (status.value, row["ticket_id"]))
-        return Report(assignment_id, row["ticket_id"], state, summary, question, now)
+        return Report(assignment_id, row["ticket_id"], state, summary, question, now, fields, style_fail)
+
+    def refuse_style(self, assignment_id: str, token: str, limit: int) -> int | None:
+        """Count one report refused for its wording and return the count. None once `limit` were refused: that
+        report goes through."""
+        with self._connect() as connection:
+            row = _running_assignment(connection, assignment_id, token)
+            if row["style_refusals"] >= limit:
+                return None
+            connection.execute(
+                "UPDATE assignments SET style_refusals = style_refusals + 1 WHERE id = ?", (assignment_id,)
+            )
+            return int(row["style_refusals"]) + 1
 
     def reports_for(self, assignment_id: str, limit: int = 20) -> list[Report]:
         with self._connect() as connection:
@@ -467,29 +507,43 @@ class Store:
 
     def move_to_outbox(
         self,
-        render_report: Callable[[Report, str], str | None],
-        render_escalation: Callable[[str, str, str], str],
+        render_report: Callable[[Report, Ticket], str | None],
+        render_escalation: Callable[[str, str, Ticket, int], str],
     ) -> None:
         now = time.time()
         with self._connect() as connection:
+            # reports and tickets share no column name, so one row holds both.
             reports = connection.execute(
-                "SELECT r.*, t.channel, t.goal FROM reports r JOIN tickets t ON t.id = r.ticket_id "
+                "SELECT r.*, t.* FROM reports r JOIN tickets t ON t.id = r.ticket_id "
                 "WHERE r.relayed_at IS NULL ORDER BY r.seq"
             ).fetchall()
             for row in reports:
-                text = render_report(_report_from_row(row), row["goal"])
+                text = render_report(_report_from_row(row), _ticket_from_row(row))
                 if text is not None:
                     _queue(connection, row["ticket_id"], row["channel"], text)
                 connection.execute("UPDATE reports SET relayed_at = ? WHERE seq = ?", (now, row["seq"]))
             escalations = connection.execute(
-                "SELECT e.seq, e.ticket_id, e.reason, t.channel, t.goal FROM watchdog_events e "
+                "SELECT e.seq AS event_seq, e.verdict, e.reason, t.*, (SELECT COUNT(*) FROM watchdog_events r "
+                "WHERE r.ticket_id = e.ticket_id AND r.action = ? AND r.seq < e.seq "
+                "AND r.at >= COALESCE(t.resumed_at, 0)) AS restarts FROM watchdog_events e "
                 "JOIN tickets t ON t.id = e.ticket_id WHERE e.relayed_at IS NULL AND e.action = ? ORDER BY e.seq",
-                (RepairAction.ESCALATE.value,),
+                (RepairAction.RESTART.value, RepairAction.ESCALATE.value),
             ).fetchall()
             for row in escalations:
-                text = render_escalation(row["reason"], row["ticket_id"], row["goal"])
-                _queue(connection, row["ticket_id"], row["channel"], text)
-                connection.execute("UPDATE watchdog_events SET relayed_at = ? WHERE seq = ?", (now, row["seq"]))
+                text = render_escalation(row["verdict"], row["reason"], _ticket_from_row(row), row["restarts"])
+                _queue(connection, row["id"], row["channel"], text)
+                connection.execute("UPDATE watchdog_events SET relayed_at = ? WHERE seq = ?", (now, row["event_seq"]))
+
+    @contextmanager
+    def relay_lock(self) -> Iterator[None]:
+        """One relay at a time across processes: the tick and the router both send, and neither may send a row
+        the other is sending."""
+        descriptor = os.open(self.path.with_name(RELAY_LOCK_FILENAME), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(descriptor)
 
     def final_reports_since(self, since: float) -> list[tuple[DigestItem, ReportState]]:
         with self._connect() as connection:
@@ -811,6 +865,36 @@ class Store:
         return [(row["verdict"], row["action"], row["reason"]) for row in rows]
 
 
+def _running_assignment(connection: sqlite3.Connection, assignment_id: str, token: str) -> sqlite3.Row:
+    row: sqlite3.Row | None = connection.execute("SELECT * FROM assignments WHERE id = ?", (assignment_id,)).fetchone()
+    if row is None or not secrets.compare_digest(row["token_hash"], hash_token(token)):
+        raise StaleAssignmentError(f"bad credentials for assignment {assignment_id}")
+    if row["status"] != AssignmentStatus.RUNNING.value:
+        raise StaleAssignmentError(f"assignment {assignment_id} has ended, report refused")
+    return row
+
+
+def _json(fields: ReportFields | None) -> str | None:
+    return None if fields is None else json.dumps(asdict(fields))
+
+
+def _fields_from_json(text: str | None) -> ReportFields | None:
+    if not text:
+        return None
+    data = json.loads(text)
+    return ReportFields(
+        outcome=data["outcome"],
+        changes=tuple(data["changes"]),
+        checks=tuple(Check(check["name"], check["passed"]) for check in data["checks"]),
+        links=tuple(data["links"]),
+        next_for_leo=data["next_for_leo"],
+        topic=data["topic"],
+        lessons=tuple(data["lessons"]),
+        details=data["details"],
+        approve=bool(data.get("approve")),
+    )
+
+
 def _at_capacity(connection: sqlite3.Connection, ticket_id: str, max_running: int | None) -> bool:
     if max_running is None:
         return False
@@ -898,6 +982,9 @@ def _ticket_from_row(row: sqlite3.Row) -> Ticket:
         row["loop"] or "",
         row["repo"] or "",
         row["scope_class"] or "",
+        row["title"] or "",
+        row["done_when"] or "",
+        row["created_at"],
     )
 
 
@@ -909,5 +996,12 @@ def _assignment_from_row(row: sqlite3.Row) -> Assignment:
 
 def _report_from_row(row: sqlite3.Row) -> Report:
     return Report(
-        row["assignment_id"], row["ticket_id"], ReportState(row["state"]), row["summary"], row["question"], row["at"]
+        row["assignment_id"],
+        row["ticket_id"],
+        ReportState(row["state"]),
+        row["summary"],
+        row["question"],
+        row["at"],
+        _fields_from_json(row["fields"]),
+        bool(row["style_fail"]),
     )

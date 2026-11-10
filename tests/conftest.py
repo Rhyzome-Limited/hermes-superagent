@@ -70,6 +70,10 @@ class FakeBackend:
 
 
 def unlabelled(text: str) -> str:
+    """A relayed message as "<State>: <body>", from "<icon> <State> · <title> · <ticket>" and its body lines."""
+    head, _, body = text.partition("\n")
+    if match := re.fullmatch(r"\S+ (.+?) · .+ · tk-\w+", head):
+        return f"{match[1]}: {body}"
     return re.sub(r" \[[^\]]*\]:", ":", text, count=1)
 
 

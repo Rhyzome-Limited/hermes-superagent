@@ -8,7 +8,7 @@ from types import FrameType
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from superagent.domain import ReportState  # noqa: E402
+from superagent.domain import ReportFields, ReportState  # noqa: E402
 from superagent.reporting import identity_from_workdir, submit_report  # noqa: E402
 from superagent.store import StaleAssignmentError  # noqa: E402
 
@@ -22,7 +22,8 @@ def honest(goal: str) -> None:
     for summary in ("reading the auth module", "reproduced the redirect loop", "fix written, tests pass"):
         submit_report(identity, ReportState.PROGRESS, summary)
         time.sleep(0.15)
-    submit_report(identity, ReportState.READY, f"pull request opened for: {goal[:60]}")
+    outcome = ReportFields(outcome="The pull request is open. Its tests pass.")
+    submit_report(identity, ReportState.READY, f"pull request opened for: {goal[:60]}", fields=outcome)
 
 
 def stuck() -> None:

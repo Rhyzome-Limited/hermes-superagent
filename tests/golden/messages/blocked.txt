@@ -1,0 +1,4 @@
+⛔ Needs you · Push retry limit · tk-1a2b3c4d
+Should a failed push retry 3 times or 5 times?
+The ticket does not say. Both are easy to change later.
+Reply here to answer.

@@ -336,7 +336,7 @@ def test_blocked_parks_the_ticket_and_asks_once(router: Router, backend: FakeBac
     assert router.store.get_ticket(ticket_id).status is TicketStatus.WAITING
     assert router.store.running_assignments() == []
     assert [(ticket, channel, unlabelled(text)) for ticket, channel, text in router.relay()] == [
-        (ticket_id, "chat:th1", "Blocked: Postgres or SQLite?")
+        (ticket_id, "chat:th1", "Needs you: Postgres or SQLite?")
     ]
     assert check_once(router) == []
     assert len(backend.started) == 1
@@ -552,7 +552,7 @@ def test_the_person_who_asked_can_cancel_their_ticket(router: Router, backend: F
     assert backend.stopped == [backend.started[0][1]]
     assert router.store.running_assignments() == []
     [message] = [text for _, _, text in router.relay()]
-    assert message.startswith("Cancelled [") and "by alice" in message
+    assert message.startswith("⏹️ Cancelled · fix the login bug · ") and "by alice" in message
     assert check_once(router) == []
     assert len(backend.started) == 1
 
@@ -688,5 +688,5 @@ def test_messages_the_old_attempt_cap_gave_up_on_are_retried_again(tmp_path: Pat
 def test_a_long_worker_summary_is_split_to_fit(router: Router, backend: FakeBackend) -> None:
     done_report(router, backend, " ".join(["x" * 30] * 80))
     texts = [text for _, _, text in router.relay()]
-    assert len(texts) == 2
+    assert len(texts) == 3  # line 1, then the long body in two parts
     assert all(len(text) <= MESSAGE_LIMIT for text in texts)

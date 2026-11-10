@@ -161,7 +161,7 @@ WORKER = """
 import sys, time
 from pathlib import Path
 sys.path.insert(0, {root!r})
-from superagent.domain import ReportState
+from superagent.domain import ReportFields, ReportState
 from superagent.reporting import identity_from_workdir, submit_report
 identity = identity_from_workdir(Path.cwd())
 home = identity.db_path.parent
@@ -169,7 +169,7 @@ submit_report(identity, ReportState.PROGRESS, "started")
 deadline = time.time() + 90
 while not (home / "release").exists() and time.time() < deadline:
     time.sleep(0.05)
-submit_report(identity, ReportState.READY, "finished " + identity.ticket_id)
+submit_report(identity, ReportState.READY, "", fields=ReportFields(outcome="finished " + identity.ticket_id))
 """
 
 

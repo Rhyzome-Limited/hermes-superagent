@@ -16,7 +16,7 @@ from .agents import ATTENTION_STATES, HOOK_SCRIPT, SessionState, settings_block
 from .brief import BriefSettings, build_brief
 from .config import DB_FILENAME
 from .digest import build_digest, send_digest
-from .domain import ReportState, ScopeClass, Trigger
+from .domain import ReportFields, ReportState, ScopeClass, Trigger
 from .ledger import Item, ItemState, Ledger, LedgerError
 from .reporting import identity_from_workdir, submit_report
 from .router import Assessor
@@ -79,7 +79,9 @@ def setup_parser(parser: argparse.ArgumentParser) -> None:
     snooze.add_argument("--until", required=True, help="ISO date or date and time, local time")
     report = commands.add_parser("report", help="report status from a worker directory, for agents outside Hermes")
     report.add_argument("--state", required=True, choices=_WORKER_STATES)
-    report.add_argument("--summary", required=True)
+    report.add_argument("--outcome", default="", help="what is true now, in plain words: Leo reads it in chat")
+    report.add_argument("--details", default="", help="free technical text, shown only on request")
+    report.add_argument("--summary", default="", help="old name of --details")
     report.add_argument("--question", default="")
     report.add_argument("--scope-class", default="", choices=["", *_SCOPE_CLASSES], help="kastle-build-loop only")
 
@@ -92,17 +94,19 @@ def run(
     assessor: Assessor | None = None,
 ) -> int:
     if args.superagent_command == "report":
-        print(
-            json.dumps(
-                submit_report(
-                    identity_from_workdir(Path.cwd()),
-                    ReportState(args.state),
-                    args.summary,
-                    args.question,
-                    args.scope_class,
-                )
+        try:
+            answer = submit_report(
+                identity_from_workdir(Path.cwd()),
+                ReportState(args.state),
+                args.summary,
+                args.question,
+                args.scope_class,
+                ReportFields(outcome=args.outcome, details=args.details),
             )
-        )
+        except ValueError as error:
+            print(json.dumps({"error": str(error)}), file=sys.stderr)
+            return 1
+        print(json.dumps(answer))
         return 0
     home = args.home or (default_home() if default_home else None)
     if home is None:

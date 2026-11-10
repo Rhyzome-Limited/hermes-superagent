@@ -441,7 +441,7 @@ def test_gate_failure_fails_closed(tmp_path: Path) -> None:
 def test_dispatch_tool_refuses_a_refused_trigger(tmp_path: Path) -> None:
     ctx = registered("router", tmp_path)
     inbound(ctx, user_id="u-mallory")
-    call = {"trigger_id": "discord:c1:1", "goal": "x", "loop": "build-loop"}
+    call = {"trigger_id": "discord:c1:1", "goal": "x", "loop": "build-loop", "title": "X"}
     answer = json.loads(ctx.tools["superagent_dispatch"]["handler"](call))
     assert "not admitted" in answer["error"]
 

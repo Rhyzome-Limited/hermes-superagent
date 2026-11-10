@@ -48,7 +48,11 @@ def test_repeating_worker_is_nudged_then_restarted_then_escalated(router: Router
     assert third.action is RepairAction.ESCALATE
     assert router.store.get_ticket(ticket_id).status is TicketStatus.ENDED
     assert router.store.running_assignments() == []
-    assert [unlabelled(text) for _, _, text in router.relay()] == ["Needs you: last 3 reports are identical"]
+    assert [unlabelled(text) for _, _, text in router.relay()] == [
+        f"Stuck: The worker sent the same report 3 times.\nThe watchdog restarted it once, then stopped it.\n"
+        f'You: send "details {ticket_id}" to see why.'
+    ]
+    assert "Watchdog stopped it: last 3 reports are identical" in router.details(ticket_id)
 
 
 def test_restart_fences_out_the_old_worker(router: Router, backend: FakeBackend) -> None:
@@ -98,7 +102,7 @@ def test_a_worker_that_cannot_be_stopped_escalates_without_a_second_worker(
     assert result.action is RepairAction.ESCALATE
     assert len(backend.started) == 1
     assert router.store.get_ticket(result.ticket_id).status is TicketStatus.ENDED
-    assert "could not stop a worker" in router.relay()[0][2]
+    assert "The watchdog could not stop the worker. It may still run." in router.relay()[0][2]
 
 
 def test_an_unstoppable_worker_escalates_once(router: Router, backend: FakeBackend) -> None:
@@ -128,7 +132,7 @@ def test_reaper_failure_leaves_a_running_replacement_alone(router: Router, backe
     check_once(router, policy=WatchdogPolicy(reap_grace_seconds=-1))
     assert router.store.get_ticket(ticket.id).status is TicketStatus.OPEN
     assert len(router.store.running_assignments()) == 1
-    assert "could not stop a worker" in router.relay()[0][2]
+    assert "The watchdog could not stop the worker. It may still run." in router.relay()[0][2]
 
 
 def test_one_unstoppable_finished_worker_does_not_block_the_checks(router: Router, backend: FakeBackend) -> None:
@@ -143,7 +147,7 @@ def test_one_unstoppable_finished_worker_does_not_block_the_checks(router: Route
     backend.on_stop = denied
     results = check_once(router, policy=WatchdogPolicy(reap_grace_seconds=-1))
     assert [item.verdict for item in results] == [Verdict.ON_TRACK]
-    assert any("could not stop a worker" in text for _, _, text in router.relay())
+    assert any("The watchdog could not stop the worker." in text for _, _, text in router.relay())
 
 
 def test_dead_worker_skips_the_nudge(router: Router, backend: FakeBackend) -> None:
@@ -329,8 +333,12 @@ def test_a_worker_that_exits_without_reporting_is_parked_for_a_person(router: Ro
     ticket = router.store.get_ticket(result.ticket_id)
     assert ticket.status is TicketStatus.WAITING
     [message] = [text for _, _, text in router.relay()]
-    assert unlabelled(message).startswith("Blocked: The worker exited without a final report.")
-    assert "opened a pull request" in message
+    assert unlabelled(message) == (
+        "Needs you: Should the worker run again?\nIt stopped without a final report.\n"
+        f'Reply "approve {ticket.id}" or say what to change.'
+    )
+    assert "opened a pull request" not in message  # raw worker output stays out of chat
+    assert "opened a pull request" in router.details(ticket.id)
     assert check_once(router) == []
 
 

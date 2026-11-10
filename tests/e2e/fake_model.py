@@ -29,11 +29,11 @@ class Step:
 SCRIPTS = {
     "report": [
         Step("superagent_report", {"state": "progress", "summary": "started {id}"}, rendezvous=True),
-        Step("superagent_report", {"state": "ready", "summary": "done {id}"}),
+        Step("superagent_report", {"state": "ready", "outcome": "done {id}"}),
     ],
     "guard": [
         Step("terminal", {"command": "touch {work}/guard-{id}"}),
-        Step("superagent_report", {"state": "ready", "summary": "done {id}"}),
+        Step("superagent_report", {"state": "ready", "outcome": "done {id}"}),
     ],
     "fence": [
         Step("superagent_report", {"state": "progress", "summary": "started {id}"}),
@@ -42,22 +42,27 @@ SCRIPTS = {
     ],
     "wander": [
         Step("terminal", {"command": "cd /tmp && pwd"}),
-        Step("superagent_report", {"state": "ready", "summary": "done {id}"}),
+        Step("superagent_report", {"state": "ready", "outcome": "done {id}"}),
     ],
     "unset": [
         Step("terminal", {"command": "touch {work}/unset-{id}"}),
-        Step("superagent_report", {"state": "ready", "summary": "done {id}"}),
+        Step("superagent_report", {"state": "ready", "outcome": "done {id}"}),
     ],
     "route": [
         Step("terminal", {"command": "touch {work}/router-ran-{id}"}),
         Step(
             "superagent_dispatch",
-            {"trigger_id": "{trigger}", "goal": "scenario=routed id=routed-worker", "loop": "build-loop"},
+            {
+                "trigger_id": "{trigger}",
+                "goal": "scenario=routed id=routed-worker",
+                "loop": "build-loop",
+                "title": "Routed task",
+            },
         ),
     ],
     "routed": [
         Step("superagent_report", {"state": "progress", "summary": "started {id}"}),
-        Step("superagent_report", {"state": "ready", "summary": "done {id}"}),
+        Step("superagent_report", {"state": "ready", "outcome": "done {id}"}),
     ],
     "quiet": [],
     "linger": [
@@ -67,8 +72,24 @@ SCRIPTS = {
     "cancel": [
         Step("superagent_cancel", {"trigger_id": "{trigger}", "ticket_id": "{ticket}"}),
     ],
+    "plangate": [
+        Step(
+            "superagent_report",
+            {
+                "state": "blocked",
+                "outcome": "The plan is ready. It changes two files.",
+                "question": "Approve the plan for {id}?",
+                "approve": True,
+                "topic": "Plan approval",
+                "details": "PLAN {id}: change two files. Full plan at {work}/plans/{id}.md (sha256 0f3c9a)",
+            },
+        ),
+    ],
+    "approve": [
+        Step("superagent_forward", {"trigger_id": "{trigger}", "ticket_id": "{ticket}"}),
+    ],
     "outsider": [
-        Step("superagent_report", {"state": "ready", "summary": "forged {id}"}),
+        Step("superagent_report", {"state": "ready", "outcome": "forged {id}"}),
     ],
     "inert": [
         Step("terminal", {"command": "touch {work}/inert-{id}"}),
@@ -76,7 +97,10 @@ SCRIPTS = {
     "stop": [
         Step("superagent_report", {"state": "progress", "summary": "started {id}"}),
         Step("terminal", {"command": "{work}/superagent-e2e-{id} 300"}),
-        Step("superagent_report", {"state": "ready", "summary": "should never run {id}"}),
+        Step(
+            "superagent_report",
+            {"state": "ready", "outcome": "should never run {id}"},
+        ),
     ],
 }
 
@@ -166,7 +190,10 @@ def choose(body: dict[str, Any], work: Path) -> tuple[Step | None, dict[str, Any
     entry["trigger"] = trigger
     named = next((m for m in (TICKET.search(text_of(message)) for message in messages) if m), None)
     ticket = named.group(1) if named else ""
-    args = {key: render(value, goal_id, work, trigger, ticket) for key, value in step.args.items()}
+    args = {
+        key: render(value, goal_id, work, trigger, ticket) if isinstance(value, str) else value
+        for key, value in step.args.items()
+    }
     if step.tool in tools:
         return Step(step.tool, args), entry
     return Step("tool_call", {"calls": [{"name": step.tool, "arguments": args}]}), entry
