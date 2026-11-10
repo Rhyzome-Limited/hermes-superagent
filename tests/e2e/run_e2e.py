@@ -262,7 +262,10 @@ STOP_MARKER = "superagent-e2e-stopped"  # on the worker's own command line, so a
 
 
 def scenario_stop(runtime: Runtime, log: Path, work: Path) -> None:
-    (work / STOP_MARKER).symlink_to(shutil.which("sleep") or "/bin/sleep")
+    # A script, not a symlink to sleep: Ubuntu's sleep (uutils coreutils) refuses to run under another name.
+    marker = work / STOP_MARKER
+    marker.write_text(f"#!{sys.executable}\nimport sys, time\ntime.sleep(float(sys.argv[1]))\n", encoding="utf-8")
+    marker.chmod(0o755)
     ticket = start_task(runtime, "scenario=stop id=stopped")
     running = wait_until(lambda: subprocess.run(["pgrep", "-f", STOP_MARKER], check=False).returncode == 0)
     check("stop: the worker's command started", running, turns(log, "stopped")[-3:])
