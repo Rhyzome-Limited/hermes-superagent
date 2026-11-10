@@ -136,6 +136,23 @@ def test_blocked_needs_a_question(worker: tuple[Any, Store, str]) -> None:
     )
 
 
+def test_an_approval_park_is_stored_and_names_the_reply(worker: tuple[Any, Store, str], tmp_path: Path) -> None:
+    report, store, assignment_id = worker
+    park = {
+        "state": "blocked",
+        "outcome": "The plan is ready.",
+        "question": "Approve the plan for the push retry fix?",
+        "approve": True,
+        "details": "Plan at /Users/leonardo/superagent/p2/plans/x.md: retry 3 times, then stop.",
+    }
+    assert json.loads(report(park))["reported"] == "blocked"
+    [stored] = store.reports_for(assignment_id)
+    assert stored.fields is not None and stored.fields.approve
+    ticket_id = store.get_assignment(assignment_id).ticket_id
+    [(_, _, text)] = open_runtime(tmp_path).router.relay()
+    assert text.endswith(f'\nReply "approve {ticket_id}" or say what to change.')
+
+
 def test_too_many_changes_are_refused(worker: tuple[Any, Store, str]) -> None:
     report, _, _ = worker
     answer = json.loads(report({**GOOD_READY, "changes": ["One.", "Two.", "Three.", "Four."]}))

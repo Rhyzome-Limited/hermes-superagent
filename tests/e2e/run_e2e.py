@@ -19,8 +19,10 @@ import yaml
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from superagent.domain import RepairAction, Trigger  # noqa: E402
+from superagent.domain import RepairAction, Ticket, Trigger  # noqa: E402
+from superagent.router import Outcome, ticket_title  # noqa: E402
 from superagent.runtime import Runtime, open_runtime  # noqa: E402
+from superagent.style import check_message  # noqa: E402
 from superagent.watchdog import WatchdogPolicy, check_once  # noqa: E402
 
 PORT = 18999
@@ -126,6 +128,29 @@ def report_states(runtime: Runtime, ticket: str) -> list[str]:
     return [report.state.value for report in runtime.store.ticket_reports(ticket)]
 
 
+def expect_park(name: str, text: str, ticket: Ticket, question: str) -> None:
+    """A park that waits for an approval, as Leo reads it: header, question, context, then the exact reply."""
+    lines = text.split("\n")
+    header = f"⛔ Needs you · {ticket_title(ticket)} · {ticket.id}"
+    hint = f'Reply "approve {ticket.id}" or say what to change.'
+    check(f"{name}: line 1 is the Needs you header", lines[0] == header, lines[:1])
+    check(f"{name}: the question is line 2", lines[1:2] == [question], lines[1:2])
+    check(f"{name}: the last line is the exact reply hint", lines[-1] == hint, lines[-1:])
+    check(f"{name}: 4 lines that pass the style check", len(lines) == 4 and not check_message(text), text)
+
+
+def sent_messages(sent: Path, channel: str) -> list[str]:
+    delivered = sent.read_text(encoding="utf-8") if sent.exists() else ""
+    prefix = f"{channel}\t"
+    return [line[len(prefix) :].replace("\\n", "\n") for line in delivered.splitlines() if line.startswith(prefix)]
+
+
+def attempts_of(home: Path, ticket: str) -> list[int]:
+    with sqlite3.connect(home / "superagent.db") as connection:
+        rows = connection.execute("SELECT attempt FROM assignments WHERE ticket_id = ? ORDER BY attempt", (ticket,))
+        return [row[0] for row in rows]
+
+
 def scenario_overlap(runtime: Runtime, log: Path) -> None:
     tickets = {goal_id: start_task(runtime, f"scenario=report id={goal_id}") for goal_id in ("alpha", "beta")}
     for goal_id, ticket in tickets.items():
@@ -161,8 +186,21 @@ def scenario_quiet(runtime: Runtime, log: Path) -> None:
     patient = WatchdogPolicy(stall_after_seconds=3600, orphan_after_seconds=3600)
     parked = [result for result in check_once(runtime.router, policy=patient) if result.ticket_id == ticket]
     check("quiet: the watchdog parks it for a person", [r.action for r in parked] == [RepairAction.PARK], parked)
-    questions = [report.question for report in runtime.store.ticket_reports(ticket)]
-    check("quiet: the question carries the worker's last words", any("finished" in q for q in questions), questions)
+    messages = [text for item, _, text in runtime.router.relay(only_channel="chat:e2e") if item == ticket]
+    check("quiet: one message reaches the chat", len(messages) == 1, messages)
+    expect_park(
+        "quiet", messages[-1] if messages else "", runtime.store.get_ticket(ticket), "Should the worker run again?"
+    )
+    details = runtime.router.command_reply(f"details {ticket}") or ""
+    check("quiet: details return the worker's last words", "finished" in details, details)
+    approve = Trigger(f"approve-{ticket}", "chat", "", "alice", f"approve {ticket}", "chat:e2e", True)
+    admitted = runtime.router.ingest(approve, auto_dispatch=False).outcome is Outcome.ADMITTED
+    runtime.store.take_admitted("chat", "alice", approve.text, 600)
+    runtime.router.forward(approve.id, ticket)
+    check(
+        "quiet: 'approve <ticket>' starts the next assignment", admitted and attempts_of(runtime.home, ticket) == [1, 2]
+    )
+    runtime.router.cancel(ticket, "the e2e run")
     check("quiet: the task is not run a second time", len(turns(log, "quiet")) == 1, turns(log, "quiet"))
 
 
@@ -415,13 +453,13 @@ def stage_router(work: Path, log: Path) -> None:
             listed.stdout[-300:] + listed.stderr[-300:],
         )
         delivered = sent.read_text(encoding="utf-8") if sent.exists() else ""
-        check("watchdog: the result is relayed to the person", "]: done routed-worker" in delivered, delivered)
+        check("watchdog: the result is relayed to the person", "\\ndone routed-worker." in delivered, delivered)
         back_to_chat = any(
             line.startswith("webhook:") and "done routed-worker" in line for line in delivered.splitlines()
         )
         check("watchdog: the relay goes back to the webhook chat", back_to_chat, delivered)
         check("github: the result goes to the team channel", "discord:team\t✅ Done · " in delivered, delivered)
-        check("relay: messages name their task", "· tk-" in delivered and "]: done gh-worker" in delivered, delivered)
+        check("relay: messages name their task", "· tk-" in delivered and "\\ndone gh-worker." in delivered, delivered)
         config_path = home / "superagent.toml"
         good = config_path.read_text(encoding="utf-8")
         config_path.write_text(good.replace('policy = "explicit_only"', 'policy = "explicit_only', 1), encoding="utf-8")
@@ -434,6 +472,7 @@ def stage_router(work: Path, log: Path) -> None:
         alerted = sent.read_text(encoding="utf-8") if sent.exists() else ""
         check("alerts: the broken config reaches the alerts channel", "discord:alerts\tAlert: config:" in alerted)
         config_path.write_text(good, encoding="utf-8")
+        scenario_plan_gate(open_runtime(home), log, sent)
         scenario_cancel(open_runtime(home), log, work, sent)
         scenario_digest(sent)
     finally:
@@ -456,6 +495,40 @@ def scenario_environment_untouched(hermes_home: Path) -> None:
     roots = [hermes_home, Path(shutil.which("hermes") or "hermes").resolve().parents[1]]
     leaked = [str(path) for root in roots for path in root.rglob("site-packages/pytest")]
     check("enabling the plugin puts no dev tools in the Hermes environment", not leaked, leaked)
+
+
+def scenario_plan_gate(runtime: Runtime, log: Path, sent: Path) -> None:
+    trigger = Trigger(
+        id="plangate-1",
+        source="webhook:inbox",
+        thread="",
+        actor="webhook:inbox",
+        text="scenario=plangate id=plangate",
+        channel="webhook:plangate",
+        addressed=True,
+    )
+    ticket = runtime.router.ingest(trigger).ticket_ids[0]
+    parked = wait_until(lambda: "blocked" in report_states(runtime, ticket), timeout=120.0)
+    check("plan gate: the worker parks for approval", parked, report_states(runtime, ticket))
+    hermes("-p", "watchdog", "superagent", "tick")
+    messages = sent_messages(sent, "webhook:plangate")
+    check("plan gate: one message reaches the chat", len(messages) == 1, messages)
+    expect_park(
+        "plan gate",
+        messages[-1] if messages else "",
+        runtime.store.get_ticket(ticket),
+        "Approve the plan for plangate?",
+    )
+    details = runtime.router.command_reply(f"details {ticket}") or ""
+    check("plan gate: details return the moved plan text", "PLAN plangate: change two files." in details, details)
+    post_webhook("inbox", f"approve {ticket} scenario=approve id=approve-request ticket={ticket}")
+    resumed = wait_until(lambda: attempts_of(runtime.home, ticket) == [1, 2], timeout=120.0)
+    check(
+        "plan gate: 'approve <ticket>' through the router starts the next assignment",
+        resumed,
+        turns(log, "approve-request"),
+    )
+    runtime.router.cancel(ticket, "the e2e run")
 
 
 def scenario_cancel(runtime: Runtime, log: Path, work: Path, sent: Path) -> None:

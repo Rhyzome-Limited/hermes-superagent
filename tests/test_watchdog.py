@@ -332,8 +332,9 @@ def test_a_worker_that_exits_without_reporting_is_parked_for_a_person(router: Ro
     ticket = router.store.get_ticket(result.ticket_id)
     assert ticket.status is TicketStatus.WAITING
     [message] = [text for _, _, text in router.relay()]
-    assert unlabelled(message) == "Needs you: Should the worker run again?\nIt stopped without a final report.\n" + (
-        "Reply here to answer."
+    assert unlabelled(message) == (
+        "Needs you: Should the worker run again?\nIt stopped without a final report.\n"
+        f'Reply "approve {ticket.id}" or say what to change.'
     )
     assert "opened a pull request" not in message  # raw worker output stays out of chat
     assert "opened a pull request" in router.details(ticket.id)

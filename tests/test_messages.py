@@ -114,6 +114,34 @@ def test_details_never_reach_the_done_message() -> None:
     assert "2c512b5" not in text and "42756344802" not in text
 
 
+def test_an_approval_park_tells_leo_the_exact_reply() -> None:
+    park = report(
+        "tk-1a2b3c4d",
+        ReportState.BLOCKED,
+        question="Approve the plan for the push retry fix?",
+        outcome="The plan is ready. It changes two files.",
+        topic="Plan approval",
+        approve=True,
+        details="Plan for tk-1a2b3c4d at /Users/leonardo/superagent/p2/plans/tk-1a2b3c4d.md: retry 3 times.",
+    )
+    text = _render_report(park, ticket("tk-1a2b3c4d", "Push retry limit"))
+    assert text == (
+        "⛔ Needs you · Push retry limit · tk-1a2b3c4d\n"
+        "Approve the plan for the push retry fix?\n"
+        "The plan is ready. It changes two files.\n"
+        'Reply "approve tk-1a2b3c4d" or say what to change.'
+    )
+    assert style.check_message(text or "") == []
+
+
+def test_a_style_fail_approval_park_still_names_the_reply() -> None:
+    park = report("tk-1a2b3c4d", ReportState.BLOCKED, question="x", outcome="x", approve=True)
+    failed = Report("as-1", "tk-1a2b3c4d", ReportState.BLOCKED, "x", "x", 0.0, park.fields, style_fail=True)
+    assert (_render_report(failed, ticket("tk-1a2b3c4d", "Push retry limit")) or "").endswith(
+        '\nReply "approve tk-1a2b3c4d" or say what to change.'
+    )
+
+
 def test_a_style_fail_report_gets_only_code_written_text() -> None:
     bad = Report("as-1", "tk-ee69ce72", ReportState.READY, "x", "", 0.0, READY.fields, style_fail=True)
     assert _render_report(bad, ticket("tk-ee69ce72", "Guards CI fix")) == (

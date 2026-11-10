@@ -175,6 +175,12 @@ REPORT_SCHEMA = {
                 "type": "string",
                 "description": "With blocked: what the question is about, max 4 words, such as 'Retry count'.",
             },
+            "approve": {
+                "type": "boolean",
+                "description": "With blocked: true when Leo answers by approving, such as a plan. Ask a short "
+                "question like 'Approve the plan for the retry fix?' and put the plan and its path in details. "
+                "Code tells Leo the exact reply.",
+            },
             "lessons": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -566,6 +572,7 @@ def report_fields(args: Mapping[str, Any]) -> ReportFields:
         topic=_text(args.get("topic")),
         lessons=_texts(args.get("lessons"))[:2],
         details=_text(args.get("details")),
+        approve=args.get("approve") is True,
     )
 
 

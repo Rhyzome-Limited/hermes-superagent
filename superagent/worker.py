@@ -63,6 +63,8 @@ def render_brief(ticket: Ticket, context: str = "") -> str:
         "A new worker picks the task up with the answer.\n"
         "- Leo reads outcome, changes, check names, next_for_leo, question and topic in chat: plain words, max 20 "
         "in each sentence. SHAs, run ids and logs go in details. summary is the old name of details.\n"
+        "- To park for an approval, such as a plan, report blocked with approve true, a short question such as "
+        "'Approve the plan for <task>?', and the plan and its path in details.\n"
         f"{earlier}"
     )
 

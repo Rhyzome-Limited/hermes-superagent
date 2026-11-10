@@ -891,6 +891,7 @@ def _fields_from_json(text: str | None) -> ReportFields | None:
         topic=data["topic"],
         lessons=tuple(data["lessons"]),
         details=data["details"],
+        approve=bool(data.get("approve")),
     )
 
 

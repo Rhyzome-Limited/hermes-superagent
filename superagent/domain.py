@@ -135,6 +135,8 @@ class ReportFields:
     topic: str = ""
     lessons: tuple[str, ...] = ()
     details: str = ""
+    # With blocked: Leo answers by approving (a plan, a rerun), so chat names the exact reply.
+    approve: bool = False
 
 
 @dataclass(frozen=True)

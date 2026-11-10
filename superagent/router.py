@@ -86,6 +86,7 @@ DONE_WHEN_WORDS = 12
 DEFAULT_DONE_WHEN = "the gate command passes"
 STATUS_TICKETS = 8
 REPLY_HINT = "Reply here to answer."
+APPROVE_HINT = 'Reply "approve {ticket}" or say what to change.'
 _STATUS_COMMAND = re.compile(r"\s*status\s*[?.!]?\s*", re.IGNORECASE)
 _DETAILS_COMMAND = re.compile(r"\s*details\s+(tk-[0-9a-f]{8})\s*[?.!]?\s*", re.IGNORECASE)
 _PULL = re.compile(r"github\.com/[\w.-]+/[\w.-]+/pull/(\d+)", re.IGNORECASE)
@@ -490,10 +491,11 @@ def _render_report(report: Report, ticket: Ticket) -> str | None:
     lines = [f"{_HEADERS[report.state]} · {ticket_title(ticket)} · {ticket.id}"]
     fields = report.fields
     details = f'Send "details {ticket.id}"'
+    reply = APPROVE_HINT.format(ticket=ticket.id) if fields and fields.approve else REPLY_HINT
     if report.style_fail:
         lines += {
             ReportState.READY: [f"Gate passed. {details} for more."],
-            ReportState.BLOCKED: [f"The worker has a question. {details} to read it.", REPLY_HINT],
+            ReportState.BLOCKED: [f"The worker has a question. {details} to read it.", reply],
             ReportState.FAILED: [f"The worker could not finish. {details} for more."],
         }[report.state]
     elif fields is None:  # stored before schema v2: its free text is all there is
@@ -506,7 +508,7 @@ def _render_report(report: Report, ticket: Ticket) -> str | None:
         room = style.MAX_REPORT_LINES - 2 - len(tail)
         lines += [_sentence(fields.outcome), *(f"• {_sentence(change)}" for change in fields.changes[:room]), *tail]
     elif report.state is ReportState.BLOCKED:
-        lines += [_sentence(report.question), _sentence(fields.outcome), REPLY_HINT]
+        lines += [_sentence(report.question), _sentence(fields.outcome), reply]
     else:
         tried = " ".join(_sentence(change) for change in fields.changes)
         lines += [_sentence(fields.outcome), tried, _you(fields.next_for_leo)]
