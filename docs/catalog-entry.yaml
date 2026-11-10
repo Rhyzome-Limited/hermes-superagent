@@ -3,7 +3,7 @@ repo: https://github.com/AirKyzzZ/hermes-superagent
 sha: "0000000000000000000000000000000000000000"
 requires_hermes: ">=0.22.7"
 version: "0.1.0"
-description: "A resident router that dispatches and never executes, isolated workers that report only to it, team-written trigger rules, and an external watchdog that checks real progress and goal drift. Disclosure: spawns long-running worker processes from the argv you configure, runs the outbound send command and the connector commands you configure, which read sources into its ledger, stops or restarts its own workers, and spends tokens on the watchdog profile's model during ticks. Writes its database and worker directories under the configured home. Its hooks stay inert until a profile sets a role."
+description: "A resident router that dispatches and never executes, isolated workers that report only to it, team-written trigger rules, and an external watchdog that checks real progress and goal drift. Disclosure: spawns long-running worker processes from the argv you configure, runs the outbound send command and the connector commands you configure, which read sources into its ledger, stops or restarts its own workers, and spends tokens on the watchdog profile's model during ticks. Writes its database and worker directories under the configured home. In the turn that starts a ticket, it replaces the router's reply with the code-written Started message. Its hooks stay inert until a profile sets a role."
 platforms: [linux, macos]
 maintainer: AirKyzzZ
 tier: community
@@ -12,6 +12,6 @@ docs_url: https://github.com/AirKyzzZ/hermes-superagent#readme
 image: https://raw.githubusercontent.com/AirKyzzZ/hermes-superagent/0000000000000000000000000000000000000000/assets/cover.png
 capabilities:
   provides_tools: [superagent_dispatch, superagent_forward, superagent_cancel, superagent_status, superagent_report, superagent_tick, superagent_digest]
-  provides_hooks: [pre_tool_call, post_tool_call, pre_gateway_dispatch, pre_llm_call]
+  provides_hooks: [pre_tool_call, post_tool_call, pre_gateway_dispatch, pre_llm_call, transform_llm_output]
   provides_middleware: []
   requires_env: []

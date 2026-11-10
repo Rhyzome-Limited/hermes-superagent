@@ -62,6 +62,7 @@ class FakeContext:
     settings: dict[str, str]
     tools: dict[str, dict[str, Any]] = field(default_factory=dict)
     hooks: dict[str, Callable[..., Any]] = field(default_factory=dict)
+    hook_options: dict[str, dict[str, Any]] = field(default_factory=dict)
     commands: dict[str, dict[str, Any]] = field(default_factory=dict)
     blueprints: list[str] = field(default_factory=list)
     sections: dict[str, Callable[..., str]] = field(default_factory=dict)
@@ -77,8 +78,9 @@ class FakeContext:
     def register_tool(self, name: str, toolset: str, schema: dict[str, Any], handler: Any, **kwargs: Any) -> None:
         self.tools[name] = {"schema": schema, "handler": handler, "toolset": toolset, **kwargs}
 
-    def register_hook(self, name: str, callback: Callable[..., Any]) -> None:
+    def register_hook(self, name: str, callback: Callable[..., Any], **options: Any) -> None:
         self.hooks[name] = callback
+        self.hook_options[name] = options
 
     def register_cli_command(self, **kwargs: Any) -> None:
         self.commands[kwargs["name"]] = kwargs

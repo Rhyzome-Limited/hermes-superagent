@@ -1,7 +1,7 @@
 name: hermes-superagent
 version: 0.1.0
 manifest_version: 2
-description: "A resident router that dispatches and never executes, isolated workers that report only to it, team-written trigger rules, and an external watchdog that checks real progress and goal drift. Based on DeepSeek's Super-agent design. Disclosure: spawns long-running worker processes from the argv you configure, runs the outbound send command and the connector commands you configure, which read sources into its ledger, stops or restarts its own workers, and spends tokens on the watchdog profile's model during ticks. Writes its database and worker directories under the configured home. Its hooks stay inert until a profile sets a role. macOS and Linux only."
+description: "A resident router that dispatches and never executes, isolated workers that report only to it, team-written trigger rules, and an external watchdog that checks real progress and goal drift. Based on DeepSeek's Super-agent design. Disclosure: spawns long-running worker processes from the argv you configure, runs the outbound send command and the connector commands you configure, which read sources into its ledger, stops or restarts its own workers, and spends tokens on the watchdog profile's model during ticks. Writes its database and worker directories under the configured home. In the turn that starts a ticket, it replaces the router's reply with the code-written Started message. Its hooks stay inert until a profile sets a role. macOS and Linux only."
 author: AirKyzzZ
 license: MIT
 homepage: https://github.com/AirKyzzZ/hermes-superagent
@@ -20,6 +20,7 @@ provides_hooks:
   - post_tool_call
   - pre_gateway_dispatch
   - pre_llm_call
+  - transform_llm_output
 config_schema:
   role:
     type: str
