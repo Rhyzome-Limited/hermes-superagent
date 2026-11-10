@@ -173,7 +173,14 @@ class Router:
         return Disposition(Outcome.DISPATCHED, decision.reason, (ticket.id,))
 
     def dispatch(
-        self, trigger_id: str, goal: str, loop: str = DEFAULT_LOOP, repo: str = "", title: str = "", done_when: str = ""
+        self,
+        trigger_id: str,
+        goal: str,
+        loop: str = DEFAULT_LOOP,
+        repo: str = "",
+        title: str = "",
+        done_when: str = "",
+        on_started: Callable[[Ticket, str], None] | None = None,
     ) -> Ticket:
         repo = repo.strip()
         if len(repo) > MAX_REPO_CHARS:
@@ -188,8 +195,13 @@ class Router:
         trigger = self._admitted_trigger(trigger_id)
         if self.store.claim_offered_trigger(trigger_id, "dispatched", OFFER_VALID_SECONDS):
             ticket = self._open_ticket(trigger, goal, Strength.EXPLICIT, routed, repo, title, done_when)
-            # Code says the ticket started, so the router model has nothing to confirm (tuning plan A.4).
-            self.store.queue_message(ticket.id, ticket.channel, _render_started(ticket))
+            # Code says the ticket started, so the router model has nothing to confirm (tuning plan A.4). The
+            # caller may carry the message in the router's own reply instead of the outbox.
+            started = _render_started(ticket)
+            if on_started is not None:
+                on_started(ticket, started)
+            else:
+                self.store.queue_message(ticket.id, ticket.channel, started)
             return ticket
         existing = self.store.ticket_for_trigger(trigger_id)
         if existing is not None and self.store.assessment_of(trigger_id) == "dispatched":

@@ -169,10 +169,19 @@ def admitted_trigger(ctx: FakeContext, text: str = "fix the push retry") -> str:
     return str(offered(ctx, text)["context"].split("trigger_id=")[1].split("\n")[0])
 
 
-def dispatch(ctx: FakeContext, trigger_id: str, **args: str) -> dict[str, Any]:
+def dispatch(ctx: FakeContext, trigger_id: str, session: str = "s-chat", **args: str) -> dict[str, Any]:
+    """superagent_dispatch as a chat turn calls it: Hermes passes the turn's session id."""
     payload = {"trigger_id": trigger_id, "goal": "Fix the push retry in kastle-push.", "loop": "claude-assisted-loop"}
-    result: dict[str, Any] = json.loads(ctx.tools["superagent_dispatch"]["handler"]({**payload, **args}))
+    handler = ctx.tools["superagent_dispatch"]["handler"]
+    result: dict[str, Any] = json.loads(handler({**payload, **args}, session_id=session))
     return result
+
+
+def reply_after(ctx: FakeContext, session: str = "s-chat", text: str = "[SILENT]") -> Any:
+    """What the router's own reply becomes: transform_llm_output at the end of the turn."""
+    return ctx.hooks["transform_llm_output"](
+        response_text=text, session_id=session, model="m", platform="discord", turn_id="turn-1"
+    )
 
 
 def test_dispatch_needs_a_short_title(tmp_path: Path) -> None:
@@ -186,24 +195,68 @@ def test_dispatch_needs_a_short_title(tmp_path: Path) -> None:
     assert "ticket" in dispatch(ctx, trigger_id, title="Push retry limit")
 
 
-def test_one_dispatch_sends_exactly_one_message_the_started_template(tmp_path: Path) -> None:
+def test_one_dispatch_on_a_chat_turn_is_exactly_one_message_the_started_template(tmp_path: Path) -> None:
+    # Hermes 0.22.7 refuses a bare [SILENT] on a DM turn and sends its own notice, so the Started message is the
+    # router's reply itself: code writes it, nothing goes through the outbox, and the chat gets one message.
     ctx, sent = router_home(tmp_path)
     trigger_id = admitted_trigger(ctx)
     args = {"title": "Push retry limit", "repo": "Rhyzome-Limited/kastle-push", "done_when": "CI passes"}
     answer = dispatch(ctx, trigger_id, **args)
-    assert "[SILENT]" in answer["note"]
-    [message] = sent_texts(sent)
-    assert message == f"▶️ Started · Push retry limit · {answer['ticket']}\nRepo: kastle-push.\nDone when: CI passes."
-    assert style.check_message(message) == []
+    assert sent_texts(sent) == []
+    started = f"▶️ Started · Push retry limit · {answer['ticket']}\nRepo: kastle-push.\nDone when: CI passes."
+    assert reply_after(ctx) == started
+    assert style.check_message(started) == []
+    assert reply_after(ctx) is None
     assert dispatch(ctx, trigger_id, **args)["ticket"] == answer["ticket"]
-    assert len(sent_texts(sent)) == 1
+    assert reply_after(ctx) is None and sent_texts(sent) == []
+
+
+def test_the_started_reply_belongs_to_its_own_session(tmp_path: Path) -> None:
+    ctx, _ = router_home(tmp_path)
+    dispatch(ctx, admitted_trigger(ctx), session="s-a", title="Push retry limit")
+    assert reply_after(ctx, session="s-b") is None
+    assert reply_after(ctx, session="s-a").startswith("▶️ Started · Push retry limit · tk-")
+
+
+def test_a_stale_started_reply_is_dropped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx, _ = router_home(tmp_path)
+    dispatch(ctx, admitted_trigger(ctx), title="Push retry limit")
+    later = time.time() + 3600
+    monkeypatch.setattr(time, "time", lambda: later)
+    assert reply_after(ctx) is None
+
+
+def test_a_dispatch_without_a_session_sends_started_through_the_outbox(tmp_path: Path) -> None:
+    ctx, sent = router_home(tmp_path)
+    answer = dispatch(ctx, admitted_trigger(ctx), session="", title="Push retry limit")
+    assert sent_texts(sent) == [
+        f"▶️ Started · Push retry limit · {answer['ticket']}\nRepo: not named.\nDone when: the gate command passes."
+    ]
+    assert reply_after(ctx, session="") is None
+
+
+def test_the_started_reply_goes_only_where_the_ticket_reports() -> None:
+    from superagent.domain import Mandate, Strength, Ticket, TicketStatus, Trigger
+    from superagent.plugin import started_goes_in_reply
+
+    mandate = Mandate("v", "g", Strength.EXPLICIT, "a", "discord", "t")
+    ticket = Ticket("tk-1", "g", mandate, "discord:c1", TicketStatus.OPEN)
+    assert started_goes_in_reply(Trigger("t", "discord", "", "a", "x", "discord:c1", True), ticket)
+    # A CLI turn answers in the terminal; its ticket reports to the [sources.cli] notify channel.
+    assert not started_goes_in_reply(Trigger("t", "cli", "", "a", "x", "", True), ticket)
+    assert not started_goes_in_reply(Trigger("t", "discord", "", "a", "x", "discord:other", True), ticket)
+
+
+def test_the_reply_hook_holds_the_stream_and_is_inert_outside_the_router(tmp_path: Path) -> None:
+    ctx, _ = router_home(tmp_path)
+    assert ctx.hook_options["transform_llm_output"] == {"hold_stream": True}
+    assert context("worker", tmp_path).hooks["transform_llm_output"](response_text="hi", session_id="s") is None
 
 
 def test_done_when_falls_back_to_the_gate(tmp_path: Path) -> None:
-    ctx, sent = router_home(tmp_path)
+    ctx, _ = router_home(tmp_path)
     dispatch(ctx, admitted_trigger(ctx), title="Push retry limit")
-    [message] = sent_texts(sent)
-    assert message.endswith("\nRepo: not named.\nDone when: the gate command passes.")
+    assert reply_after(ctx).endswith("\nRepo: not named.\nDone when: the gate command passes.")
 
 
 def test_done_when_is_capped_at_12_words(tmp_path: Path) -> None:
@@ -231,8 +284,8 @@ def test_status_from_leo_is_answered_by_code_with_the_status_template(tmp_path: 
     decision = inbound(ctx, text="Status?", message_id="2")
     assert decision["action"] == "skip"
     assert offered(ctx, "Status?") is None
-    wait_for(lambda: len(sent_texts(sent)) == 2)
-    reply = sent_texts(sent)[1]
+    wait_for(lambda: len(sent_texts(sent)) == 1)
+    [reply] = sent_texts(sent)
     assert reply == "1 ticket running. None needs you.\n• Push retry limit: running for 0 min."
     assert style.check_message(reply, max_lines=style.MAX_STATUS_LINES) == []
 
@@ -258,8 +311,8 @@ def test_details_returns_the_stored_details_and_checks(tmp_path: Path) -> None:
     )
     store.add_report(assignment.id, token, ReportState.READY, "x", fields=fields)
     assert inbound(ctx, text=f"details {ticket_id}", message_id="3")["action"] == "skip"
-    wait_for(lambda: len(sent_texts(sent)) >= 2)
-    reply = "\n".join(sent_texts(sent)[1:])
+    wait_for(lambda: len(sent_texts(sent)) >= 1)
+    reply = "\n".join(sent_texts(sent))
     assert reply.startswith(f"Details · Push retry limit · {ticket_id}\n")
     assert "Run 42756344802 on macos-26-arm64: relay-guard 364 passed." in reply
     assert "Checks: relay-guard ✓" in reply
