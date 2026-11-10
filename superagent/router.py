@@ -18,6 +18,7 @@ from .domain import (
     Assignment,
     Loop,
     Mandate,
+    RepairAction,
     Report,
     ReportFields,
     ReportState,
@@ -89,6 +90,7 @@ REPLY_HINT = "Reply here to answer."
 APPROVE_HINT = 'Reply "approve {ticket}" or say what to change.'
 _STATUS_COMMAND = re.compile(r"\s*status\s*[?.!]?\s*", re.IGNORECASE)
 _DETAILS_COMMAND = re.compile(r"\s*details\s+(tk-[0-9a-f]{8})\s*[?.!]?\s*", re.IGNORECASE)
+_UNSTOPPABLE = "could not stop a worker"
 _PULL = re.compile(r"github\.com/[\w.-]+/[\w.-]+/pull/(\d+)", re.IGNORECASE)
 _HEADERS = {ReportState.READY: "✅ Done", ReportState.BLOCKED: "⛔ Needs you", ReportState.FAILED: "❌ Failed"}
 
@@ -328,18 +330,25 @@ class Router:
         except KeyError:
             return f"No ticket {ticket_id}."
         reports = self.store.ticket_reports(ticket_id)
-        if not reports:
-            return chat_safe(f"Details · {ticket_title(ticket)} · {ticket.id}\nNo report yet.")
-        last = reports[-1]
-        fields = last.fields or ReportFields(details=last.summary)
+        stopped = [
+            reason for _, action, reason in self.store.watchdog_events(ticket_id) if action == RepairAction.ESCALATE
+        ]
         lines = [
             f"Details · {ticket_title(ticket)} · {ticket.id}",
-            last.question,
-            fields.details,
-            *(f"• {change}" for change in fields.changes),
-            _checks_line(fields),
-            " ".join(fields.links),
+            f"Watchdog stopped it: {stopped[-1]}" if stopped else "",
         ]
+        if reports:
+            last = reports[-1]
+            fields = last.fields or ReportFields(details=last.summary)
+            lines += [
+                last.question,
+                fields.details,
+                *(f"• {change}" for change in fields.changes),
+                _checks_line(fields),
+                " ".join(fields.links),
+            ]
+        else:
+            lines.append("No report yet.")
         return chat_safe(redact("\n".join(line for line in lines if line)))
 
     def is_allowed(self, trigger: Trigger) -> bool:
@@ -516,32 +525,31 @@ def _render_report(report: Report, ticket: Ticket) -> str | None:
 
 
 def _render_escalation(verdict: str, reason: str, ticket: Ticket, restarts: int) -> str:
-    stopped, again = _what_stopped(verdict, reason)
-    if restarts:
-        did = f"The watchdog restarted it {'once' if restarts == 1 else f'{restarts} times'}. It is {again} again."
-    else:
-        did = "The watchdog did not restart it."
-    you = f'You: check it, or send "cancel {ticket.id}".'
-    return _finish(f"🚨 Stuck · {ticket_title(ticket)} · {ticket.id}\n{stopped}\n{did}\n{you}")
+    """An escalation ends the ticket (watchdog.apply_repair), so the message says so and points at details."""
+    restarted = f"restarted it {'once' if restarts == 1 else f'{restarts} times'}, then " if restarts else ""
+    stop = "tried to stop it" if reason.startswith(_UNSTOPPABLE) else "stopped it"
+    did = f"The watchdog {restarted}{stop}."
+    you = f'You: send "details {ticket.id}" to see why.'
+    return _finish(f"🚨 Stuck · {ticket_title(ticket)} · {ticket.id}\n{_what_stopped(verdict, reason)}\n{did}\n{you}")
 
 
-def _what_stopped(verdict: str, reason: str) -> tuple[str, str]:
-    """The watchdog's own reason (watchdog.py) in plain words, and the word for a worker that does it again."""
+def _what_stopped(verdict: str, reason: str) -> str:
+    """The watchdog's own reason (watchdog.py) in plain words. Its raw text is in details."""
     if match := re.fullmatch(r"no report for (\d+)s", reason):
         minutes = max(1, round(int(match[1]) / 60))
-        return f"The worker sent no report for {minutes} minute{'s' if minutes > 1 else ''}.", "silent"
+        return f"The worker sent no report for {minutes} minute{'s' if minutes > 1 else ''}."
     if reason.startswith("worker process is gone"):
-        return "The worker stopped without a final report.", "gone"
+        return "The worker stopped without a final report."
     if match := re.fullmatch(r"same tool call and result (\d+) times in a row", reason):
-        return f"The worker repeated the same step {match[1]} times.", "stuck"
+        return f"The worker repeated the same step {match[1]} times."
     if match := re.fullmatch(r"last (\d+) reports are identical", reason):
-        return f"The worker sent the same report {match[1]} times.", "stuck"
+        return f"The worker sent the same report {match[1]} times."
     if reason == "open ticket has no running worker":
-        return "The ticket had no running worker.", "stuck"
-    if reason.startswith("could not stop a worker"):
-        return "The watchdog could not stop the worker. It may still run.", "stuck"
+        return "The ticket had no running worker."
+    if reason.startswith(_UNSTOPPABLE):
+        return "The watchdog could not stop the worker. It may still run."
     # The drift judge's reason is model-written, so only its verdict reaches chat.
-    return ("The worker drifted from the goal." if verdict == Verdict.DRIFTING else "The worker is stuck."), "stuck"
+    return "The worker drifted from the goal." if verdict == Verdict.DRIFTING else "The worker is stuck."
 
 
 def _render_started(ticket: Ticket) -> str:

@@ -49,9 +49,10 @@ def test_repeating_worker_is_nudged_then_restarted_then_escalated(router: Router
     assert router.store.get_ticket(ticket_id).status is TicketStatus.ENDED
     assert router.store.running_assignments() == []
     assert [unlabelled(text) for _, _, text in router.relay()] == [
-        f"Stuck: The worker sent the same report 3 times.\nThe watchdog restarted it once. It is stuck again.\n"
-        f'You: check it, or send "cancel {ticket_id}".'
+        f"Stuck: The worker sent the same report 3 times.\nThe watchdog restarted it once, then stopped it.\n"
+        f'You: send "details {ticket_id}" to see why.'
     ]
+    assert "Watchdog stopped it: last 3 reports are identical" in router.details(ticket_id)
 
 
 def test_restart_fences_out_the_old_worker(router: Router, backend: FakeBackend) -> None:
