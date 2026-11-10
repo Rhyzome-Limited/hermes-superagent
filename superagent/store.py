@@ -7,7 +7,7 @@ import sqlite3
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from .domain import (
@@ -16,10 +16,12 @@ from .domain import (
     Assignment,
     AssignmentStatus,
     DigestItem,
+    Loop,
     Mandate,
     RepairAction,
     Report,
     ReportState,
+    ScopeClass,
     Strength,
     Ticket,
     TicketStatus,
@@ -75,7 +77,7 @@ CREATE TABLE IF NOT EXISTS watchdog_events (
 BUSY_TIMEOUT_SECONDS = 5
 MAX_REPORT_CHARS = 2000
 OFFERED = "offered to router"
-_LIVE_STATUSES = (TicketStatus.OPEN.value, TicketStatus.WAITING.value)
+_LIVE_STATUSES = (TicketStatus.OPEN.value, TicketStatus.WAITING.value, TicketStatus.QUEUED.value)
 
 
 class StaleAssignmentError(PermissionError):
@@ -90,6 +92,10 @@ _MIGRATIONS = (
     "ALTER TABLE outbox ADD COLUMN next_attempt_at REAL",
     "ALTER TABLE outbox ADD COLUMN drop_reason TEXT",
     "UPDATE outbox SET failed_at = NULL WHERE sent_at IS NULL AND failed_at IS NOT NULL AND drop_reason IS NULL",
+    "ALTER TABLE tickets ADD COLUMN loop TEXT",
+    "ALTER TABLE tickets ADD COLUMN repo TEXT",
+    "ALTER TABLE tickets ADD COLUMN scope_class TEXT",
+    "ALTER TABLE tickets ADD COLUMN queued_at REAL",
 )
 SEND_RETRY_BASE_SECONDS = 60.0
 SEND_RETRY_CAP_SECONDS = 1800.0
@@ -135,6 +141,8 @@ def split_message(text: str, limit: int = MESSAGE_LIMIT) -> list[str]:
 
 
 def _queue(connection: sqlite3.Connection, ticket_id: str, channel: str, text: str) -> None:
+    if not channel:
+        return  # A ticket from a source with no channel, such as the CLI without [sources.cli] notify, tells nobody.
     connection.executemany(
         "INSERT INTO outbox (ticket_id, channel, text) VALUES (?,?,?)",
         [(ticket_id, channel, part) for part in split_message(text)],
@@ -152,7 +160,12 @@ class Store:
             connection.execute("BEGIN IMMEDIATE")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             for statement in _MIGRATIONS[version:]:
-                connection.execute(statement)
+                try:
+                    connection.execute(statement)
+                except sqlite3.OperationalError as error:
+                    # Older code sharing the file resets user_version, so a column this code added may be there.
+                    if not str(error).startswith("duplicate column name"):
+                        raise
             connection.execute(f"PRAGMA user_version = {len(_MIGRATIONS)}")
             connection.execute("COMMIT")
         finally:
@@ -194,6 +207,14 @@ class Store:
             )
             return cursor.rowcount == 1
 
+    def next_trigger_number(self, prefix: str) -> int:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id FROM triggers WHERE substr(id, 1, ?) = ?", (len(prefix), prefix)
+            ).fetchall()
+        numbers = [int(tail) for row in rows if (tail := row["id"][len(prefix) :]).isdigit()]
+        return max(numbers, default=0) + 1
+
     def admission_of(self, trigger_id: str) -> Admission | None:
         with self._connect() as connection:
             row = connection.execute("SELECT admission FROM triggers WHERE id = ?", (trigger_id,)).fetchone()
@@ -204,12 +225,14 @@ class Store:
             row = connection.execute("SELECT * FROM triggers WHERE id = ?", (trigger_id,)).fetchone()
         return _trigger_from_row(row) if row else None
 
-    def create_ticket(self, goal: str, mandate: Mandate, channel: str, thread: str) -> tuple[Ticket, bool]:
+    def create_ticket(
+        self, goal: str, mandate: Mandate, channel: str, thread: str, loop: str = "", repo: str = ""
+    ) -> tuple[Ticket, bool]:
         ticket_id = f"tk-{secrets.token_hex(4)}"
         with self._connect() as connection:
             cursor = connection.execute(
-                "INSERT OR IGNORE INTO tickets (id, goal, mandate, channel, status, created_at, trigger_id) "
-                "VALUES (?,?,?,?,?,?,?)",
+                "INSERT OR IGNORE INTO tickets "
+                "(id, goal, mandate, channel, status, created_at, trigger_id, loop, repo) VALUES (?,?,?,?,?,?,?,?,?)",
                 (
                     ticket_id,
                     goal,
@@ -218,12 +241,14 @@ class Store:
                     TicketStatus.OPEN.value,
                     time.time(),
                     mandate.trigger_id,
+                    loop,
+                    repo,
                 ),
             )
             if cursor.rowcount == 1:
                 if thread:
                     connection.execute("INSERT INTO subscriptions VALUES (?,?)", (thread, ticket_id))
-                return Ticket(ticket_id, goal, mandate, channel, TicketStatus.OPEN), True
+                return Ticket(ticket_id, goal, mandate, channel, TicketStatus.OPEN, loop, repo), True
             row = connection.execute("SELECT * FROM tickets WHERE trigger_id = ?", (mandate.trigger_id,)).fetchone()
         return _ticket_from_row(row), False
 
@@ -252,7 +277,7 @@ class Store:
     def live_tickets(self) -> list[Ticket]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM tickets WHERE status IN (?,?) ORDER BY created_at", _LIVE_STATUSES
+                "SELECT * FROM tickets WHERE status IN (?,?,?) ORDER BY created_at", _LIVE_STATUSES
             ).fetchall()
         return [_ticket_from_row(row) for row in rows]
 
@@ -278,19 +303,23 @@ class Store:
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT s.ticket_id FROM subscriptions s JOIN tickets t ON t.id = s.ticket_id "
-                "WHERE s.thread = ? AND t.status IN (?,?)",
+                "WHERE s.thread = ? AND t.status IN (?,?,?)",
                 (thread, *_LIVE_STATUSES),
             ).fetchall()
         return [row["ticket_id"] for row in rows]
 
-    def create_assignment(self, ticket_id: str) -> tuple[Assignment, str] | None:
+    def create_assignment(self, ticket_id: str, max_running: int | None = None) -> tuple[Assignment, str] | None:
+        """Start an attempt on an open ticket, or queue the ticket when max_running workers already run."""
         with self._connect() as connection:
             status = connection.execute("SELECT status FROM tickets WHERE id = ?", (ticket_id,)).fetchone()
             if status is None or status["status"] != TicketStatus.OPEN.value:
                 return None
+            if _at_capacity(connection, ticket_id, max_running):
+                _queue_ticket(connection, ticket_id)
+                return None
             return _insert_assignment(connection, ticket_id)
 
-    def resume_waiting_ticket(self, ticket_id: str) -> tuple[Assignment, str] | None:
+    def resume_waiting_ticket(self, ticket_id: str, max_running: int | None = None) -> tuple[Assignment, str] | None:
         now = time.time()
         with self._connect() as connection:
             cursor = connection.execute(
@@ -299,7 +328,27 @@ class Store:
             )
             if cursor.rowcount != 1:
                 return None
+            if _at_capacity(connection, ticket_id, max_running):
+                _queue_ticket(connection, ticket_id)
+                return None
             return _insert_assignment(connection, ticket_id)
+
+    def start_next_queued(self, max_running: int) -> tuple[Ticket, Assignment, str] | None:
+        """Open the longest-queued ticket and start its attempt, if a worker slot is free."""
+        with self._connect() as connection:
+            if _at_capacity(connection, "", max_running):
+                return None
+            row = connection.execute(
+                "SELECT * FROM tickets WHERE status = ? ORDER BY queued_at, created_at, rowid LIMIT 1",
+                (TicketStatus.QUEUED.value,),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                "UPDATE tickets SET status = ?, queued_at = NULL WHERE id = ?", (TicketStatus.OPEN.value, row["id"])
+            )
+            assignment, token = _insert_assignment(connection, row["id"])
+            return replace(_ticket_from_row(row), status=TicketStatus.OPEN), assignment, token
 
     def set_assignment_pid(self, assignment_id: str, pid: int) -> None:
         with self._connect() as connection:
@@ -372,7 +421,13 @@ class Store:
         return [_assignment_from_row(row) for row in rows]
 
     def add_report(
-        self, assignment_id: str, token: str, state: ReportState, summary: str, question: str = ""
+        self,
+        assignment_id: str,
+        token: str,
+        state: ReportState,
+        summary: str,
+        question: str = "",
+        scope_class: str = "",
     ) -> Report:
         now = time.time()
         with self._connect() as connection:
@@ -381,6 +436,8 @@ class Store:
                 raise StaleAssignmentError(f"bad credentials for assignment {assignment_id}")
             if row["status"] != AssignmentStatus.RUNNING.value:
                 raise StaleAssignmentError(f"assignment {assignment_id} has ended, report refused")
+            if scope_class:
+                _set_scope_class(connection, row["ticket_id"], scope_class)
             summary = summary[:MAX_REPORT_CHARS]
             question = question[:MAX_REPORT_CHARS]
             connection.execute(
@@ -754,6 +811,23 @@ class Store:
         return [(row["verdict"], row["action"], row["reason"]) for row in rows]
 
 
+def _at_capacity(connection: sqlite3.Connection, ticket_id: str, max_running: int | None) -> bool:
+    if max_running is None:
+        return False
+    row = connection.execute(
+        "SELECT COUNT(*) AS n FROM assignments WHERE status = ? AND ticket_id != ?",
+        (AssignmentStatus.RUNNING.value, ticket_id),
+    ).fetchone()
+    return int(row["n"]) >= max_running
+
+
+def _queue_ticket(connection: sqlite3.Connection, ticket_id: str) -> None:
+    connection.execute(
+        "UPDATE tickets SET status = ?, queued_at = ? WHERE id = ?",
+        (TicketStatus.QUEUED.value, time.time(), ticket_id),
+    )
+
+
 def _insert_assignment(connection: sqlite3.Connection, ticket_id: str) -> tuple[Assignment, str]:
     token = secrets.token_urlsafe(24)
     assignment_id = f"as-{secrets.token_hex(4)}"
@@ -771,6 +845,25 @@ def _insert_assignment(connection: sqlite3.Connection, ticket_id: str) -> tuple[
         (assignment_id, ticket_id, attempt, hash_token(token), AssignmentStatus.RUNNING.value, None, now),
     )
     return Assignment(assignment_id, ticket_id, attempt, AssignmentStatus.RUNNING, None, now), token
+
+
+def _set_scope_class(connection: sqlite3.Connection, ticket_id: str, scope_class: str) -> None:
+    """Record a kastle-build-loop ticket's scope class. Once leo-gated it stays leo-gated: a later in-scope
+    refuses the whole report, so a worker can never talk itself into the merge carve-out."""
+    try:
+        wanted = ScopeClass(scope_class)
+    except ValueError as error:
+        choices = " or ".join(item.value for item in ScopeClass)
+        raise ValueError(f"scope_class must be {choices}, got {scope_class!r}") from error
+    ticket = connection.execute("SELECT loop, scope_class FROM tickets WHERE id = ?", (ticket_id,)).fetchone()
+    if ticket is None or ticket["loop"] != Loop.KASTLE_BUILD.value:
+        raise ValueError(f"scope_class is only accepted on {Loop.KASTLE_BUILD.value} tickets, report refused")
+    if ticket["scope_class"] == ScopeClass.LEO_GATED.value and wanted is not ScopeClass.LEO_GATED:
+        raise ValueError("this ticket is leo-gated and that never changes, report refused")
+    connection.execute(
+        "UPDATE tickets SET scope_class = ? WHERE id = ? AND (scope_class IS NULL OR scope_class != ?)",
+        (wanted.value, ticket_id, ScopeClass.LEO_GATED.value),
+    )
 
 
 def _trigger_from_row(row: sqlite3.Row) -> Trigger:
@@ -796,7 +889,16 @@ def _ticket_from_row(row: sqlite3.Row) -> Ticket:
         source=data["source"],
         trigger_id=data["trigger_id"],
     )
-    return Ticket(row["id"], row["goal"], mandate, row["channel"], TicketStatus(row["status"]))
+    return Ticket(
+        row["id"],
+        row["goal"],
+        mandate,
+        row["channel"],
+        TicketStatus(row["status"]),
+        row["loop"] or "",
+        row["repo"] or "",
+        row["scope_class"] or "",
+    )
 
 
 def _assignment_from_row(row: sqlite3.Row) -> Assignment:

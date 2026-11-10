@@ -161,8 +161,22 @@ def test_router_cannot_execute(tmp_path: Path, tool: str) -> None:
 
 def test_router_keeps_its_own_tools(tmp_path: Path) -> None:
     ctx = registered("router", tmp_path)
-    assert ctx.hooks["pre_tool_call"](tool_name="superagent_dispatch", args={}, task_id="t") is None
-    assert ctx.hooks["pre_tool_call"](tool_name="memory", args={}, task_id="t") is None
+    for tool in ("superagent_dispatch", "superagent_status", "wiki_find", "wiki_read", "skill_view", "clarify"):
+        assert ctx.hooks["pre_tool_call"](tool_name=tool, args={}, task_id="t") is None, tool
+
+
+@pytest.mark.parametrize("tool", ["memory", "session_search"])
+def test_router_cannot_persist_or_recall_other_sessions(tmp_path: Path, tool: str) -> None:
+    pre_tool_call = registered("router", tmp_path).hooks["pre_tool_call"]
+    assert pre_tool_call(tool_name=tool, args={}, task_id="t")["action"] == "block"
+    bridged = {"calls": [{"name": "wiki_find"}, {"name": tool}]}
+    assert pre_tool_call(tool_name="tool_call", args=bridged, task_id="t")["action"] == "block"
+
+
+def test_router_reaches_the_wiki_through_the_bridge(tmp_path: Path) -> None:
+    pre_tool_call = registered("router", tmp_path).hooks["pre_tool_call"]
+    bridged = {"calls": [{"name": "wiki_find", "arguments": {"query": "809d"}}, {"name": "wiki_read"}]}
+    assert pre_tool_call(tool_name="tool_call", args=bridged, task_id="t") is None
 
 
 def use_terminal_backend(monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
@@ -304,16 +318,18 @@ def test_worker_reports_through_the_bridge(worker_ctx: tuple[FakeContext, Store,
     assert decision is None
 
 
-def test_worker_directory_is_guarded_even_with_no_role_configured(
-    worker_ctx: tuple[FakeContext, Store, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_a_worker_directory_never_gives_a_role(
+    worker_ctx: tuple[FakeContext, Store, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ctx = worker_ctx[0]
+    ctx, store, assignment_id = worker_ctx
     ctx.settings["role"] = ""
     use_terminal_backend(monkeypatch, "local")
-    assert ctx.hooks["pre_tool_call"](tool_name="send_message", args={}, task_id="t")["action"] == "block"
-    assert ctx.hooks["pre_tool_call"](tool_name="terminal", args={}, task_id="t")["action"] == "block"
-    ctx.cwd = str(tmp_path)
     assert ctx.hooks["pre_tool_call"](tool_name="terminal", args={}, task_id="t") is None
+    assert ctx.hooks["pre_tool_call"](tool_name="send_message", args={}, task_id="t") is None
+    assert not ctx.tools["superagent_report"]["check_fn"]()
+    assert ctx.sections["superagent.role"]({}) == ""
+    ctx.hooks["post_tool_call"](tool_name="terminal", args={"command": "ls"}, result="ok", task_id="t")
+    assert store.recent_activity(assignment_id, 5) == []
 
 
 def test_configured_router_keeps_its_allowlist_inside_a_worker_directory(
@@ -425,7 +441,8 @@ def test_gate_failure_fails_closed(tmp_path: Path) -> None:
 def test_dispatch_tool_refuses_a_refused_trigger(tmp_path: Path) -> None:
     ctx = registered("router", tmp_path)
     inbound(ctx, user_id="u-mallory")
-    answer = json.loads(ctx.tools["superagent_dispatch"]["handler"]({"trigger_id": "discord:c1:1", "goal": "x"}))
+    call = {"trigger_id": "discord:c1:1", "goal": "x", "loop": "build-loop"}
+    answer = json.loads(ctx.tools["superagent_dispatch"]["handler"](call))
     assert "not admitted" in answer["error"]
 
 
@@ -443,9 +460,26 @@ def test_dispatch_tool_only_works_in_the_router(tmp_path: Path) -> None:
 
 
 def test_report_tool_outside_a_worker_fails_visibly(tmp_path: Path) -> None:
-    ctx = registered("", tmp_path)
+    ctx = registered("worker", tmp_path)
     answer = json.loads(ctx.tools["superagent_report"]["handler"]({"state": "ready", "summary": "x"}))
     assert "not a superagent worker directory" in answer["error"]
+
+
+@pytest.mark.parametrize("role", ["", "router", "watchdog"])
+def test_report_tool_refuses_a_session_without_the_worker_role_even_in_a_worker_directory(
+    worker_ctx: tuple[FakeContext, Store, str], role: str
+) -> None:
+    ctx, store, assignment_id = worker_ctx
+    ctx.settings["role"] = role
+    answer = json.loads(ctx.tools["superagent_report"]["handler"]({"state": "ready", "summary": "x"}))
+    assert "only works in the worker" in answer["error"]
+    assert store.reports_for(assignment_id) == []
+
+
+@pytest.mark.parametrize("role", ["", "worker"])
+def test_status_tool_refuses_other_roles(tmp_path: Path, role: str) -> None:
+    answer = json.loads(registered(role, tmp_path).tools["superagent_status"]["handler"]({}))
+    assert "only works in the router or the watchdog" in answer["error"]
 
 
 def report_of(summary: str) -> Report:

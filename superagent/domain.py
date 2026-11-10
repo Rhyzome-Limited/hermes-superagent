@@ -30,7 +30,25 @@ HUMAN_FACING_REPORT_STATES = frozenset({ReportState.READY, ReportState.BLOCKED, 
 class TicketStatus(StrEnum):
     OPEN = "open"
     WAITING = "waiting"
+    QUEUED = "queued"
     ENDED = "ended"
+
+
+class Loop(StrEnum):
+    KASTLE_BUILD = "kastle-build-loop"
+    CLAUDE_ASSISTED = "claude-assisted-loop"
+    BUILD = "build-loop"
+
+
+# Work that reaches a ticket without the router choosing, such as an act-mode rule or `superagent ingest`.
+DEFAULT_LOOP = Loop.CLAUDE_ASSISTED
+# Live workers at once, the cap the builder's claude-multi-loop kept (task 2.9).
+DEFAULT_MAX_RUNNING = 4
+
+
+class ScopeClass(StrEnum):
+    IN_SCOPE = "in-scope"
+    LEO_GATED = "leo-gated"
 
 
 class AssignmentStatus(StrEnum):
@@ -81,6 +99,9 @@ class Ticket:
     mandate: Mandate
     channel: str
     status: TicketStatus
+    loop: str = ""
+    repo: str = ""
+    scope_class: str = ""
 
 
 @dataclass(frozen=True)

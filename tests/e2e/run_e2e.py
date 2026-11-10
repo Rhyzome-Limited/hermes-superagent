@@ -206,16 +206,27 @@ def scenario_wander(runtime: Runtime) -> None:
 def scenario_role_unset(runtime: Runtime, log: Path, work: Path, profile: Path, home: Path) -> None:
     configure_worker(profile, home, tool_search="off", role="")
     ticket = start_task(runtime, "scenario=unset id=unset")
-    wait_until(lambda: "ready" in report_states(runtime, ticket))
-    results = [result for entry in turns(log, "unset") for result in entry["tool_results"]]
-    check("no role set: the guard still applies", any("same OS user" in r for r in results), results)
-    check("no role set: the blocked command never ran", not (work / "unset-unset").exists())
-    check("no role set: the worker can still report", "ready" in report_states(runtime, ticket))
+    assignment = next(a for a in runtime.store.running_assignments() if a.ticket_id == ticket)
+    exited = wait_until(lambda: not runtime.router.backend.is_alive(assignment), timeout=120.0)
+    entries = turns(log, "unset")
+    results = [result for entry in entries for result in entry["tool_results"]]
+    offered = any("superagent_report" in entry["tools"] for entry in entries)
+    refused = any("only works in the worker" in r for r in results)
+    check("no role set: the session ends", exited)
+    check("no role set: the plugin's hooks stay inert there", not any("same OS user" in r for r in results), results)
+    check("no role set: a worker directory gives no role, so a report is refused", refused or not offered, results)
+    check("no role set: nothing is reported", "ready" not in report_states(runtime, ticket))
+    runtime.store.end_assignment(assignment.id)
+    runtime.store.end_ticket(ticket)
 
 
-def scenario_stop(runtime: Runtime, log: Path) -> None:
+STOP_MARKER = "superagent-e2e-stopped"  # on the worker's own command line, so another process can't stand in for it
+
+
+def scenario_stop(runtime: Runtime, log: Path, work: Path) -> None:
+    (work / STOP_MARKER).symlink_to(shutil.which("sleep") or "/bin/sleep")
     ticket = start_task(runtime, "scenario=stop id=stopped")
-    running = wait_until(lambda: subprocess.run(["pgrep", "-f", "sleep 300"], check=False).returncode == 0)
+    running = wait_until(lambda: subprocess.run(["pgrep", "-f", STOP_MARKER], check=False).returncode == 0)
     check("stop: the worker's command started", running, turns(log, "stopped")[-3:])
     assignment = next((a for a in runtime.store.running_assignments() if a.ticket_id == ticket), None)
     if assignment is None:
@@ -223,7 +234,7 @@ def scenario_stop(runtime: Runtime, log: Path) -> None:
         return
     runtime.store.end_assignment(assignment.id)
     runtime.router.backend.stop(assignment)
-    gone = wait_until(lambda: subprocess.run(["pgrep", "-f", "sleep 300"], check=False).returncode != 0, timeout=60.0)
+    gone = wait_until(lambda: subprocess.run(["pgrep", "-f", STOP_MARKER], check=False).returncode != 0, timeout=60.0)
     check("stop: the worker's command is gone", gone)
     settled = len(turns(log, "stopped"))
     time.sleep(10)
@@ -498,10 +509,33 @@ def scenario_digest(sent: Path) -> None:
 def scenario_host_env() -> None:
     found = subprocess.run(["pgrep", "-f", "gateway run"], capture_output=True, text=True, check=False)
     pids = found.stdout.split()
+    if not Path("/proc").is_dir():
+        # Without /proc (macOS), only the gateways this run's HERMES_HOME recorded: never another install's.
+        pids = [pid for pid in pids if pid in recorded_gateway_pids(Path(os.environ["HERMES_HOME"]))]
     check("a host gateway is running", bool(pids))
     for pid in pids:
-        environ = Path(f"/proc/{pid}/environ").read_bytes().decode(errors="replace")
-        check(f"host gateway {pid} holds no SUPERAGENT_ variable", "SUPERAGENT_" not in environ)
+        check(f"host gateway {pid} holds no SUPERAGENT_ variable", "SUPERAGENT_" not in environment_of(pid))
+
+
+def recorded_gateway_pids(hermes_home: Path) -> set[str]:
+    pids: set[str] = set()
+    for path in [hermes_home / "gateway.pid", *hermes_home.glob("profiles/*/gateway.pid")]:
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        pid = record.get("pid") if isinstance(record, dict) else record
+        if isinstance(pid, int):
+            pids.add(str(pid))
+    return pids
+
+
+def environment_of(pid: str) -> str:
+    environ = Path(f"/proc/{pid}/environ")
+    if environ.exists():
+        return environ.read_bytes().decode(errors="replace")
+    argv = ["ps", "-E", "-ww", "-o", "command=", "-p", pid]
+    return subprocess.run(argv, capture_output=True, text=True, check=False).stdout
 
 
 def show_logs(hermes_home: Path, work: Path) -> None:
@@ -555,7 +589,7 @@ def main() -> int:
         configure_worker(hermes_home / "profiles" / "worker", open_home, tool_search="off")
         opened = open_runtime(open_home)
         scenario_wander(opened)
-        scenario_stop(opened, log)
+        scenario_stop(opened, log, work)
         scenario_host_env()
         scenario_environment_untouched(hermes_home)
         stage_router(work, log)

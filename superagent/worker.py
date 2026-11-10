@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import signal
 import subprocess
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
 from .domain import Assignment, Ticket
+
+logger = logging.getLogger(__name__)
 
 IDENTITY_FILENAME = ".superagent-identity.json"
 ROLE_WORKER = "worker"
@@ -27,6 +31,7 @@ _KILL_GRACE_SECONDS = 2.0
 _LEADERLESS_GROUP_MAX_AGE_SECONDS = 6 * 3600.0
 _OUTPUT_TAIL_BYTES = 4000
 _TERMINAL_ESCAPES = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_ARGV_PLACEHOLDER = re.compile(r"\{(brief|loop|ticket)\}")
 
 
 class WorkerStopError(RuntimeError):
@@ -60,10 +65,22 @@ def render_brief(ticket: Ticket, context: str = "") -> str:
     )
 
 
-def write_identity(workdir: Path, ticket_id: str, assignment_id: str, token: str, attempt: int) -> None:
+def write_identity(
+    workdir: Path, ticket_id: str, assignment_id: str, token: str, attempt: int, loop: str = "", home: str = ""
+) -> None:
+    """Write the worker's credentials and what its tools may read: its ticket, loop and the absolute shared home.
+    Readers take the fields they need and never print the file, since it holds the token."""
     descriptor = os.open(workdir / IDENTITY_FILENAME, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    identity = {
+        "assignment": assignment_id,
+        "ticket": ticket_id,
+        "token": token,
+        "attempt": attempt,
+        "loop": loop,
+        "home": home,
+    }
     with os.fdopen(descriptor, "w", encoding="utf-8") as file:
-        json.dump({"assignment": assignment_id, "ticket": ticket_id, "token": token, "attempt": attempt}, file)
+        json.dump(identity, file)
 
 
 def _process_started_at(pid: int) -> float | None:
@@ -107,13 +124,159 @@ def _group_has_live_member(group: int) -> bool:
     return False
 
 
-def _group_exited_within(group: int, seconds: float) -> bool:
+@dataclass(frozen=True)
+class _Process:
+    pid: int
+    ppid: int
+    pgid: int
+    alive: bool
+    started: str
+
+
+def _process_table() -> dict[int, _Process]:
+    result = subprocess.run(
+        ["ps", "-A", "-o", "pid=,ppid=,pgid=,stat=,lstart="],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "LC_ALL": "C"},
+    )
+    if result.returncode != 0:
+        raise WorkerStopError(f"could not list processes: {result.stderr.strip()}")
+    table: dict[int, _Process] = {}
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) >= 5 and all(field.isdigit() for field in fields[:3]):
+            pid, ppid, pgid = (int(field) for field in fields[:3])
+            table[pid] = _Process(pid, ppid, pgid, "Z" not in fields[3], " ".join(fields[4:]))
+    return table
+
+
+def _process_tree(roots: Sequence[int], table: Mapping[int, _Process], groups: Sequence[int] = ()) -> dict[int, str]:
+    """Live processes reachable from roots, and from every member of groups, through child processes, in any session
+    or group, and through the other members of each one's process group. A group outlives its leader, so groups
+    reaches the rest of a worker whose leader has exited. Maps pid to start time, so a reused pid is told apart
+    later."""
+    children: dict[int, list[int]] = {}
+    members: dict[int, list[int]] = {}
+    for process in table.values():
+        children.setdefault(process.ppid, []).append(process.pid)
+        members.setdefault(process.pgid, []).append(process.pid)
+    spared = {os.getpid()}
+    ancestor = table.get(os.getpid())
+    while ancestor is not None and ancestor.pid > 1 and ancestor.ppid not in spared:
+        spared.add(ancestor.ppid)
+        ancestor = table.get(ancestor.ppid)
+    seen: set[int] = set()
+    pending = [pid for pid in roots if pid in table]
+    for group in groups:
+        if group not in (0, 1, os.getpgrp()):
+            pending.extend(members.get(group, ()))
+    while pending:
+        pid = pending.pop()
+        if pid in seen or pid <= 1 or pid in spared:
+            continue
+        seen.add(pid)
+        pending.extend(children.get(pid, ()))
+        if table[pid].pgid not in (0, 1, os.getpgrp()):
+            pending.extend(members.get(table[pid].pgid, ()))
+    return {pid: table[pid].started for pid in seen if table[pid].alive}
+
+
+def _gateway_pids() -> set[int]:
+    result = subprocess.run(
+        ["ps", "-A", "-o", "pid=,command="],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "LC_ALL": "C"},
+    )
+    if result.returncode != 0:
+        raise WorkerStopError(f"could not list processes: {result.stderr.strip()}")
+    pids = set()
+    for line in result.stdout.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        words = command.split()
+        if (
+            pid.isdigit()
+            and "gateway" in words
+            and "run" in words
+            and any(word == "hermes_cli.main" or word == "hermes" or word.endswith("/hermes") for word in words)
+        ):
+            pids.add(int(pid))
+    return pids
+
+
+def _cwds() -> dict[int, str]:
+    # ponytail: lsof only (macOS ships it, so do the usual Linux images); without it a stop fails loudly.
+    try:
+        result = subprocess.run(
+            ["lsof", "-a", "-u", str(os.getuid()), "-d", "cwd", "-Fn"],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={**os.environ, "LC_ALL": "C", "PATH": os.environ.get("PATH", "") + ":/usr/sbin:/usr/bin"},
+        )
+    except OSError as error:
+        raise WorkerStopError(f"could not list process directories: {error}") from error
+    cwds, pid = {}, None
+    for line in result.stdout.splitlines():
+        if line.startswith("p") and line[1:].isdigit():
+            pid = int(line[1:])
+        elif line.startswith("n") and pid is not None:
+            cwds[pid] = line[1:]
+    if not cwds:  # this process has a cwd too, so an empty list means lsof failed
+        raise WorkerStopError(f"could not list process directories: {result.stderr.strip()}")
+    return cwds
+
+
+def _gateway_commands_in(dirs: Sequence[Path], table: Mapping[int, _Process]) -> list[int]:
+    """Processes a Hermes gateway started whose cwd is in one of dirs. In Hermes 0.22.7 a worker's turn runs in a
+    gateway shared by every worker, so its commands (Opus in the background among them) are that gateway's
+    children, not the worker's: the walk from the worker never meets them. They start in the worker's directory and
+    the loops cd into the ticket's tree, so the directory finds them. Only gateway descendants count, so a shell or
+    an editor Leo opens in the tree is never touched."""
+    roots = [str(path.resolve()) for path in dirs if path.is_dir()]
+    if not roots:
+        return []
+    gateways = _gateway_pids()
+    found = []
+    for pid, cwd in _cwds().items():
+        if pid not in table or not any(cwd == root or cwd.startswith(root + os.sep) for root in roots):
+            continue
+        ancestor, hops = table[pid].ppid, 0
+        while ancestor > 1 and ancestor in table and ancestor not in gateways and hops < 64:
+            ancestor, hops = table[ancestor].ppid, hops + 1
+        if ancestor in gateways:
+            found.append(pid)
+    return found
+
+
+def _still_running(tree: Mapping[int, str], table: Mapping[int, _Process]) -> dict[int, str]:
+    return {
+        pid: started
+        for pid, started in tree.items()
+        if (process := table.get(pid)) is not None and process.alive and process.started == started
+    }
+
+
+def _signal_each(tree: Mapping[int, str], signum: int) -> None:
+    for pid in tree:
+        try:
+            os.kill(pid, signum)
+        except (ProcessLookupError, PermissionError):
+            continue  # gone already, or not ours to signal: the wait that follows reports any survivor
+
+
+def _tree_exited_within(group: int | None, tree: Mapping[int, str], seconds: float) -> bool:
     deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        if not _group_has_live_member(group):
-            return True
+    while True:
+        gone = (group is None or not _group_has_live_member(group)) and not (
+            tree and _still_running(tree, _process_table())
+        )
+        if gone or time.monotonic() >= deadline:
+            return gone
         time.sleep(_STOP_POLL_SECONDS)
-    return not _group_has_live_member(group)
 
 
 def is_same_process(pid: int, started_at: float) -> bool:
@@ -131,18 +294,24 @@ class SubprocessBackend:
         self.argv = list(argv)
         self.workdir_root = workdir_root
         self.extra_env = dict(extra_env or {})
+        # Called once a worker this process started has exited, so a queued ticket can take its slot.
+        self.on_exit: Callable[[], object] | None = None
 
     def start(self, ticket: Ticket, assignment: Assignment, token: str, context: str = "") -> int:
         if not self.argv:
             raise OSError("no [worker] argv is configured, so no worker can start")
+        if not ticket.loop and any("{loop}" in part for part in self.argv):
+            raise OSError(f"ticket {ticket.id} has no loop, and [worker] argv needs {{loop}}")
         workdir = self.workdir_root / ticket.id / assignment.id
         workdir.mkdir(parents=True, exist_ok=True)
         brief = workdir / "brief.md"
         brief.write_text(render_brief(ticket, context), encoding="utf-8")
-        write_identity(workdir, ticket.id, assignment.id, token, assignment.attempt)
+        home = str(self.workdir_root.resolve().parent)
+        write_identity(workdir, ticket.id, assignment.id, token, assignment.attempt, ticket.loop, home)
         env = {name: os.environ[name] for name in _INHERITED_ENV if name in os.environ}
         env.update(self.extra_env)
-        argv = [part.replace("{brief}", str(brief)) for part in self.argv]
+        values = {"brief": str(brief), "loop": ticket.loop, "ticket": ticket.id}
+        argv = [_ARGV_PLACEHOLDER.sub(lambda match: values[match.group(1)], part) for part in self.argv]
         with (workdir / "worker.log").open("ab") as log:
             process = subprocess.Popen(
                 argv,
@@ -153,8 +322,17 @@ class SubprocessBackend:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
-        threading.Thread(target=process.wait, daemon=True).start()
+        threading.Thread(target=self._reap, args=(process,), daemon=True).start()
         return process.pid
+
+    def _reap(self, process: subprocess.Popen[bytes]) -> None:
+        process.wait()
+        if self.on_exit is None:
+            return
+        try:
+            self.on_exit()
+        except Exception:
+            logger.exception("a worker ended but the next queued ticket could not start, the next tick retries")
 
     def last_output(self, assignment: Assignment) -> str:
         log = self.workdir_root / assignment.ticket_id / assignment.id / "worker.log"
@@ -172,30 +350,71 @@ class SubprocessBackend:
         return is_same_process(assignment.pid, assignment.started_at)
 
     def stop(self, assignment: Assignment) -> None:
-        if assignment.pid is None:
+        group = self._group_to_stop(assignment)
+        dirs = self._command_dirs(assignment)
+        table = _process_table()
+        commands = _gateway_commands_in(dirs, table)
+        if group is None and not commands:
             return
+        groups = [] if group is None else [group]
+        # Collect the whole tree before any signal: once a parent dies its children are reparented and lost. Hermes
+        # starts each terminal command in a new session, and a command can start another one with setsid. The leader
+        # may have exited already, so the walk also starts from every live member of its group, and from the
+        # commands its turn left in the shared gateway, which outlive the worker itself.
+        tree = _process_tree([*groups, *commands], table, groups=groups)
+        self._signal_group(group, signal.SIGTERM)
+        _signal_each(tree, signal.SIGTERM)
+        if _tree_exited_within(group, tree, _STOP_GRACE_SECONDS):
+            return
+        table = _process_table()
+        roots = [*groups, *_still_running(tree, table), *_gateway_commands_in(dirs, table)]
+        tree = _process_tree(roots, table, groups=groups)
+        self._signal_group(group, signal.SIGKILL)
+        _signal_each(tree, signal.SIGKILL)
+        if not _tree_exited_within(group, tree, _KILL_GRACE_SECONDS):
+            raise WorkerStopError(f"worker {assignment.id} or one of its commands survived SIGKILL")
+
+    def _command_dirs(self, assignment: Assignment) -> list[Path]:
+        """The worker's own directory, and the ticket's tree unless a later attempt works in it now (the reaper stops
+        an attempt 30 s after its final report, by which time an answer may have started the next one)."""
+        attempts = self.workdir_root / assignment.ticket_id
+        dirs = [attempts / assignment.id]
+        later = False
+        for identity in attempts.glob(f"*/{IDENTITY_FILENAME}"):
+            try:
+                later = later or int(json.loads(identity.read_text(encoding="utf-8"))["attempt"]) > assignment.attempt
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+        if not later:
+            dirs.append(self.workdir_root.parent / "trees" / assignment.ticket_id)
+        return dirs
+
+    @staticmethod
+    def _group_to_stop(assignment: Assignment) -> int | None:
+        if assignment.pid is None:
+            return None
         group = assignment.pid
         leader_started_at = _process_started_at(group)
         if leader_started_at is None:
             if _pid_exists(group):
                 raise WorkerStopError(f"could not read the start time of process {group}")
             if not _group_has_live_member(group):
-                return
+                return None
             if time.time() - assignment.started_at > _LEADERLESS_GROUP_MAX_AGE_SECONDS:
                 raise WorkerStopError(f"process group {group} has no leader and is too old to identify")
         elif abs(leader_started_at - assignment.started_at) > _PID_START_TOLERANCE_SECONDS:
+            return None
+        return group
+
+    @staticmethod
+    def _signal_group(group: int | None, signum: int) -> None:
+        if group is None:
             return
         try:
-            os.killpg(group, signal.SIGTERM)
-            if _group_exited_within(group, _STOP_GRACE_SECONDS):
-                return
-            os.killpg(group, signal.SIGKILL)
+            os.killpg(group, signum)
         except ProcessLookupError:
             return
         # macOS raises EPERM for a group holding only zombies, and any OS raises it for another user's processes.
         except PermissionError as error:
             if _group_has_live_member(group):
                 raise WorkerStopError(f"process group {group} is still running: {error}") from error
-            return
-        if not _group_exited_within(group, _KILL_GRACE_SECONDS):
-            raise WorkerStopError(f"process group {group} survived SIGKILL")

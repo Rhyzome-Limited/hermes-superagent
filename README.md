@@ -219,7 +219,7 @@ Needs Hermes 0.22.7 or newer on macOS or Linux. These steps haven't been run end
 
 <br>
 
-Install and enable it in each profile. The install scanner reports one caution, the sanitizer regex in `framing.py`, and asks you to confirm:
+Install and enable it in each profile. The install scanner reports two cautions, both in documentation: the placeholder webhook secret further down this README and a `curl | sh` line in `docs/dogfood-design.md`. It asks you to confirm:
 
 ```bash
 for p in router worker watchdog; do
@@ -239,7 +239,7 @@ allow = ["YOUR_DISCORD_USER_ID"]
 argv = ["hermes", "-p", "worker", "chat", "-Q", "--query-file", "{brief}", "-t", "terminal,file,superagent"]
 
 [outbound]
-argv = ["hermes", "-p", "router", "send", "--to", "{channel}", "{text}"]
+argv = ["hermes", "-p", "router", "send", "-q", "--to", "{channel}", "--", "{text}"]
 
 [[semantic]]
 name = "silent-fix"
@@ -271,7 +271,7 @@ Remove `terminal` and `file` from the router with `hermes -p router tools`, keep
 */5 * * * * hermes -p watchdog superagent tick
 ```
 
-Every message names its task, as in `Done [fix the login redirect · tk-1a2b]: …`, so replies can't get mixed up. To stop a task, tell the router, or run `hermes -p watchdog superagent cancel <ticket>`. Questions, results, failures and escalations reach people on the next tick. Progress stays in the store. A worker is whichever session runs in its own worker directory, so the worker profile refuses any other session and isn't for general chat.
+Every message names its task, as in `Done [fix the login redirect · tk-1a2b]: …`, so replies can't get mixed up. To stop a task, tell the router, or run `hermes -p watchdog superagent cancel <ticket>`. Stopping a worker stops its whole process tree: the plugin lists every descendant by parent pid before it signals anything, so terminal commands Hermes runs in their own session, and anything they start with `setsid`, get SIGTERM and then SIGKILL too. A process whose parent had already exited before the stop is out of reach. Questions, results, failures and escalations reach people on the next tick. Progress stays in the store. A worker is whichever session runs in its own worker directory, so the worker profile refuses any other session and isn't for general chat. That directory holds `.superagent-identity.json` (mode 0600) with `assignment`, `ticket`, `token`, `attempt`, `loop` and `home`, the absolute shared directory. Scripts a worker runs read only the fields they need, such as `jq -r .ticket`, and never print the file, since it holds the token.
 
 Hermes defers plugin tools behind `tool_call` by default, and that works. Set `tools.tool_search.enabled: off` in a profile to hand its model the tools directly.
 
@@ -317,12 +317,14 @@ The rendered prompt becomes the goal, the comment's author is checked against `a
 | `[sources.<name>] bots` | `[]` | Bots whose events can become candidates on a `candidate` source |
 | `[sources.<name>] pass_strangers` | `false` | Lets strangers' thread messages reach a worker, framed and with no authority |
 | `[sources.<name>] notify` | none | Channel that gets this source's results and escalations instead of the event's own, such as `discord:123` |
+| `[sources.cli]` | off | Lets a router chat in the Hermes CLI dispatch: `hermes -p router chat` in the classic interface, `-q` included. Each turn becomes trigger `cli:<session>:<n>` from the OS user running Hermes, read from the OS and never from the environment or the text, gated by `policy` and `allow` (OS user names) like any source, and offered to the router's model in that same turn. Its tickets' results go to `notify`, or nowhere when it's unset. The TUI and desktop surfaces aren't taken, and a gateway platform named `cli` is dropped |
 | `[sources."webhook:<route>"] via_router` | `false` | Lets the router's model read this webhook's admitted events instead of starting work directly. Authors still go through `allow` |
 | `[[semantic]] name`, `text` | required | A team rule, written in plain language |
 | `[[semantic]] mode` | `record` | `record` only logs, `act` opens a ticket |
-| `[worker] argv` | required | Command for one worker, must reference `{brief}` |
+| `[worker] argv` | required | Command for one worker, must reference `{brief}`, the file holding the task. `{loop}` becomes the ticket's loop, for example `-s {loop}`, and `{ticket}` its id. The goal never reaches the argv. A ticket with no loop, from a database older than loops, refuses to start when the argv needs `{loop}` |
 | `[worker] allow_same_user` | `false` | Allows host tools in a worker with no sandbox |
-| `[outbound] argv` | none | Delivery command using `{channel}` and `{text}`. Without it nothing is sent, and messages are still marked sent. A failed send fails every tick until it gets through. Retries back off up to 30 minutes and never give up, and `superagent outbox` lists what's waiting or drops a message for good. Messages over 1900 characters go out in numbered parts |
+| `[worker] max_running` | `4` | Most workers running at once, counted across every process sharing the database. A dispatch over the cap stores the ticket as `queued` and the tool answers `"status": "queued"`, and so does a parked ticket that a reply resumes while the cap is reached. Queued tickets start oldest first when a slot frees: when a worker this process started exits, on a cancel, and on every tick |
+| `[outbound] argv` | none | Delivery command using `{channel}` and `{text}`, replaced in one pass. Put `--` before `{text}`. Every text is passed through the chat neutraliser right here, whatever wrote it to the outbox, so `MEDIA:` tags, `[[` directives, image tags and mass mentions never reach the send command. Secrets become `[redacted]`, as does any run of 40 or more letters, digits, `-`, `_` or `+`, such as a full commit SHA. Links are removed: a GitHub pull request or issue URL becomes `owner/repo#N`, every other URL `[link removed]`, and a bare host keeps its name with each dot written `[.]` (`README[.]md`), so no chat app links it or fetches a preview. A host is read as Telegram reads one, with IDN letters, combining marks and joiners, and any character that IDNA folds into a dot (U+3002, U+FF0E, U+FE52, U+2024, the digit full stops) counts as a dot, so an ellipsis between two words also shows as `[.]`. The Markdown markers `*`, `~`, `\|` and `` ` `` count as part of a host, because Hermes's Telegram formatter turns them into formatting and Telegram reads `**evil**.com` as `evil.com`. Any `](` left over is written `] (`, so the formatter never builds a link. Without it nothing is sent, and messages are still marked sent. A failed send fails every tick until it gets through. Retries back off up to 30 minutes and never give up, and `superagent outbox` lists what's waiting or drops a message for good. Messages over 1900 characters go out in numbered parts |
 | `[digest] channel` | none | Where `superagent digest --send` and the daily digest blueprint deliver |
 | `[channels] alerts` | none | Where alerts go. An alert is sent when a tick error has lasted `alert_after_seconds`, and "Resolved" follows once it has stayed clear as long. A tick stopped at its deadline, or one stuck holding the lock, is alerted at once. Alerts raised with no channel set wait for one |
 | `[tick] deadline_seconds` | `600` | A CLI tick running longer is stopped. A tick that finds the lock held longer than this fails loudly instead of skipping |
@@ -361,21 +363,21 @@ Settings go under `plugins.entries.hermes-superagent.settings` in each profile's
 
 | Setting | Values |
 | --- | --- |
-| `role` | `router`, `worker`, `watchdog` or empty. Empty keeps the plugin inert |
+| `role` | `router`, `worker`, `watchdog` or empty. Empty keeps the plugin inert. Only this setting gives a role: a session in a worker directory is not made a worker, so set `role: worker` in the worker profile |
 | `home` | Directory shared by all three profiles, holding `superagent.toml` and the database |
 
 | Tool or hook | Used for |
 | --- | --- |
-| `superagent_dispatch` | Router opens a ticket from an admitted trigger |
+| `superagent_dispatch` | Router opens a ticket from an admitted trigger. `loop` is required and is one of `kastle-build-loop`, `claude-assisted-loop` or `build-loop`; `repo` is optional. Code overrides the router: a `repo` or goal naming `kastle-mobile` or `kastle` (also as `owner/kastle…`), or a goal holding a `CMPY-<digits>` id, always gets `kastle-build-loop`. Work that reaches a ticket without the router, such as an `act` rule or `superagent ingest`, gets `claude-assisted-loop` under the same override. The ticket stores `loop` and `repo` |
 | `superagent_forward` | Router passes a follow-up to a running or parked ticket, resuming it |
 | `superagent_cancel` | Router stops a ticket when the person who asked says so, and tells them |
-| `superagent_status` | Router lists live tickets |
-| `superagent_report` | Worker reports progress, blocked, ready, failed or dropped |
+| `superagent_status` | Router lists live tickets with their loop and state. Each goal and each worker's question comes back framed as untrusted data |
+| `superagent_report` | Worker reports progress, blocked, ready, failed or dropped. Optional `scope_class` (`in-scope` or `leo-gated`) records a `kastle-build-loop` ticket's scope triage in `tickets.scope_class`; any other loop refuses it. Once `leo-gated`, a later `in-scope` refuses the report. `superagent report --scope-class` does the same from outside Hermes |
 | `superagent_tick` | Watchdog assesses candidates, checks workers and relays |
 | `superagent_digest` | Watchdog summarises recent work, waiting questions and what record-mode rules would have started |
 | `pre_gateway_dispatch` | Runs the gate before Hermes handles a message, fails closed |
 | `pre_llm_call` | Hands the router's model the admitted trigger ids |
-| `pre_tool_call` | Enforces each role's tool policy |
+| `pre_tool_call` | Enforces each role's tool policy. The router may call only its four `superagent_*` tools, `skills_list`, `skill_view`, `clarify`, the read-only wiki tools `wiki_find` and `wiki_read`, and the tool-search bridges. It has no `memory` or `session_search`, so injected text can't persist into later sessions or pull from earlier ones |
 | `post_tool_call` | Records worker activity for the watchdog |
 
 `hermes superagent ledger list`, `show`, `close`, `ignore` and `snooze` work on the item ledger, which keeps every item a source shows until someone closes it with a reason. Connectors fill it, see `[connectors]` above and the [dogfood design](docs/dogfood-design.md).
@@ -414,7 +416,7 @@ Event content is attacker-controlled, so who can start or steer work is enforced
 | Router tricked into executing | `pre_tool_call` allowlist, plus toolsets you remove from the profile |
 | Stranger steering a worker | Bots never reach workers. Strangers don't either unless a source opts in, and a stranger can't resume a parked ticket |
 | Forged or late reports | Per-assignment token, hashed at rest, kept in a private file in the worker's directory. A session anywhere else gets no tools, and a worker is fenced before it's stopped |
-| A report exfiltrating files | Relay is code. `MEDIA:` tags are neutralised and text is capped at 100 words |
+| A report exfiltrating files | Relay is code. `MEDIA:` tags are neutralised, secrets redacted, links and images removed, and text is capped at 100 words |
 | Watchdog fooled | The judge has no tools and returns one of two values, so the most it can do is spend the repair budget and escalate |
 
 If the gate itself fails, the message is dropped and logged, so a person gets silence rather than a bypass. An allowed person's `/` commands skip the gate and go straight to Hermes unrecorded, even on an `ignore` source. They can reach the model as skills but can't start work, because dispatch needs a recorded trigger. The full threat model, with residual risks and known limits, is in [DESIGN.md](DESIGN.md#threat-model).

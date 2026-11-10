@@ -7,10 +7,14 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
+from .agents import redact
 from .domain import (
+    DEFAULT_LOOP,
+    DEFAULT_MAX_RUNNING,
     HUMAN_FACING_REPORT_STATES,
     Admission,
     Assignment,
+    Loop,
     Mandate,
     Report,
     ReportState,
@@ -35,6 +39,57 @@ OFFER_VALID_SECONDS = 3600.0
 _ATTACHMENT_TAG = re.compile(r"media:", re.IGNORECASE)
 _DIRECTIVE_OPENING = re.compile(r"\[(?=\[)")
 _MENTION = re.compile(r"@(?=everyone|here)|<@|<#")
+_IMAGE_OPENING = re.compile(r"!(?=\[)")
+# Hermes's Telegram formatter builds a link from any [text](url), including one whose text spans lines or whose
+# URL holds parentheses, which _MARKDOWN_LINK leaves alone. Splitting "](" means no link can form downstream.
+_LINK_JOIN = re.compile(r"\](?=\()")
+# No part runs past the next opening bracket, so a run of unclosed ones costs linear time. A nested image or link
+# these miss still loses its URL to _URL.
+_IMAGE_TAG = re.compile(r"!\[[^\[\]\n]*\]\([^()\n]*\)|<img\b[^<>]*>", re.IGNORECASE)
+_MARKDOWN_LINK = re.compile(r"\[([^\[\]\n]*)\]\([^()\n]*\)")
+_GITHUB_ITEM = re.compile(
+    r"(?:https?://)?(?:www\.)?github\.com/([\w.-]+/[\w.-]+)/(?:pull|issues)/(\d+)(?:[/#?][^\s)\]]*)?", re.IGNORECASE
+)
+# A full stop, one of the stops IDNA also reads as a dot, or a character that compatibility folding (NFKC, as in
+# IDNA) turns into text holding one of them: one dot leader, ellipsis, digit full stops, small full stop and more.
+_DOTS = ".\u2024-\u2026\u2488-\u249b\u3002\u33c2\u33c7\u33d8\ufe12\ufe19\ufe30\ufe52\uff0e\uff61\U0001f100"
+_DOT = f"[{_DOTS}]"
+# A character a host name can hold, by Telegram's rule. Below U+00C0 that is a letter, a digit, "_" or "-" (and the
+# soft hyphen, which IDNA drops). From U+00C0 up it is anything but a space or a dot. Real IDN hosts need this:
+# combining marks and joiners are not \w, yet they sit inside labels and TLDs, as in xn--h2brj9c (.bharat).
+# The Markdown markers * ~ | and ` count too: Hermes's Telegram formatter turns them into formatting, so Telegram
+# reads **evil**.com or evil.c`om` as evil.com.
+_NOT_IN_HOST = "".join(f"\\x{code:02x}" for code in range(0xC0) if not re.fullmatch(r"[\w\xad*~|`-]", chr(code)))
+_HOST_CHAR = rf"[^\s{_NOT_IN_HOST}{_DOTS}]"
+# A host as chat apps auto-link it without a scheme: attacker.example, a.b.co.uk, README.md, 10.0.0.1. The TLD
+# starts with anything but a digit, "_" or "-", so versions such as v0.22.7 stay. A host starts only at the first
+# label of a dotted run, which covers any host inside the run and keeps the match linear.
+_HOST = (
+    rf"(?<!{_HOST_CHAR})(?<!{_HOST_CHAR}{_DOT})"
+    rf"(?:(?:{_HOST_CHAR}+{_DOT})+(?![\d_-]){_HOST_CHAR}{_HOST_CHAR}+|\d{{1,3}}(?:{_DOT}\d{{1,3}}){{3}})"
+    rf"(?!{_HOST_CHAR})"
+)
+# A scheme counts wherever it starts, even glued to a word (x_tg://, 1http://3232235777/), whose host may hold no dot.
+_URL = re.compile(rf"(?:[a-z][a-z0-9+.-]{{0,31}}://|\bwww\.)\S+|{_HOST}(?::\d+)?[/?#]\S*", re.IGNORECASE)
+_BARE_HOST = re.compile(_HOST)
+_HOST_DOT = re.compile(_DOT)
+# A Kastle repo named on its own or as owner/name: a hyphen continues a repo name, so kastle-push is another repo.
+_KASTLE_REPO = re.compile(r"(?<![\w-])kastle(?:-mobile)?(?![\w-])", re.IGNORECASE)
+_KASTLE_TICKET = re.compile(r"(?<![\w-])CMPY-\d+(?!\w)", re.IGNORECASE)
+MAX_REPO_CHARS = 200
+
+
+def route_loop(requested: str, goal: str, repo: str = "") -> Loop:
+    """The loop a ticket runs: the router's pick from a fixed list, except that work on the Kastle repos or a
+    CMPY ticket always runs kastle-build-loop, whatever was asked."""
+    try:
+        loop = Loop(requested)
+    except ValueError as error:
+        raise ValueError(f"loop must be one of {', '.join(item.value for item in Loop)}, got {requested!r}") from error
+    named = f"{repo}\n{goal}"
+    if _KASTLE_REPO.search(named) or _KASTLE_TICKET.search(named):
+        return Loop.KASTLE_BUILD
+    return loop
 
 
 class Outcome(StrEnum):
@@ -72,10 +127,13 @@ class NotAdmittedError(PermissionError):
 
 
 class Router:
-    def __init__(self, store: Store, rules: Rules, backend: WorkerBackend) -> None:
+    def __init__(
+        self, store: Store, rules: Rules, backend: WorkerBackend, max_running: int = DEFAULT_MAX_RUNNING
+    ) -> None:
         self.store = store
         self.rules = rules
         self.backend = backend
+        self.max_running = max_running
 
     def ingest(self, trigger: Trigger, *, auto_dispatch: bool = True) -> Disposition:
         decision = gate(trigger, self.rules)
@@ -95,13 +153,17 @@ class Router:
         if not auto_dispatch:
             return Disposition(Outcome.ADMITTED, decision.reason)
         self.store.mark_assessed(trigger.id, "dispatched")
-        ticket = self._open_ticket(trigger, trigger.text, Strength.EXPLICIT)
+        ticket = self._open_ticket(trigger, trigger.text, Strength.EXPLICIT, route_loop(DEFAULT_LOOP, trigger.text))
         return Disposition(Outcome.DISPATCHED, decision.reason, (ticket.id,))
 
-    def dispatch(self, trigger_id: str, goal: str) -> Ticket:
+    def dispatch(self, trigger_id: str, goal: str, loop: str = DEFAULT_LOOP, repo: str = "") -> Ticket:
+        repo = repo.strip()
+        if len(repo) > MAX_REPO_CHARS:
+            raise ValueError(f"repo must be at most {MAX_REPO_CHARS} characters")
+        routed = route_loop(loop, goal, repo)
         trigger = self._admitted_trigger(trigger_id)
         if self.store.claim_offered_trigger(trigger_id, "dispatched", OFFER_VALID_SECONDS):
-            return self._open_ticket(trigger, goal, Strength.EXPLICIT)
+            return self._open_ticket(trigger, goal, Strength.EXPLICIT, routed, repo)
         existing = self.store.ticket_for_trigger(trigger_id)
         if existing is not None and self.store.assessment_of(trigger_id) == "dispatched":
             return existing
@@ -127,6 +189,7 @@ class Router:
         for assignment in self.store.running_assignments():
             if assignment.ticket_id == ticket_id and self.store.end_assignment(assignment.id):
                 self.backend.stop(assignment)
+        self.start_queued()
         return self.store.get_ticket(ticket_id)
 
     def _claim_for_ticket(self, trigger_id: str, ticket_id: str, assessment: str) -> tuple[Trigger, Ticket]:
@@ -165,7 +228,8 @@ class Router:
                 self.store.mark_assessed(trigger.id, f"recorded by {assessment.rule}: {assessment.goal}")
                 continue
             self.store.mark_assessed(trigger.id, f"accepted by {assessment.rule}")
-            tickets.append(self._open_ticket(trigger, assessment.goal, Strength.INFERRED))
+            loop = route_loop(DEFAULT_LOOP, assessment.goal)
+            tickets.append(self._open_ticket(trigger, assessment.goal, Strength.INFERRED, loop))
         return tickets
 
     def relay(self, send: Sender | None = None, only_channel: str = "") -> list[tuple[str, str, str]]:
@@ -210,6 +274,7 @@ class Router:
                 {
                     "ticket": ticket.id,
                     "goal": shorten(ticket.goal),
+                    "loop": ticket.loop,
                     "status": ticket.status.value,
                     "state": reports[-1].state.value if reports else "starting",
                     "question": reports[-1].question if reports and ticket.status is TicketStatus.WAITING else "",
@@ -222,10 +287,17 @@ class Router:
         return rules is not None and trigger.actor in rules.allow
 
     def start_worker(self, ticket: Ticket) -> Assignment | None:
-        created = self.store.create_assignment(ticket.id)
+        created = self.store.create_assignment(ticket.id, self.max_running)
         if created is None:
             return None
         return self._launch(ticket, *created)
+
+    def start_queued(self) -> list[Assignment]:
+        """Start queued tickets, oldest first, while fewer than max_running workers run."""
+        started: list[Assignment] = []
+        while (claimed := self.store.start_next_queued(self.max_running)) is not None:
+            started.append(self._launch(*claimed))
+        return started
 
     def _launch(self, ticket: Ticket, assignment: Assignment, token: str) -> Assignment:
         pending = self.store.pending_inputs(ticket.id)
@@ -250,14 +322,15 @@ class Router:
             raise NotAdmittedError(f"trigger {trigger_id} is no longer allowed by the current rules")
         return trigger
 
-    def _open_ticket(self, trigger: Trigger, goal: str, strength: Strength) -> Ticket:
+    def _open_ticket(self, trigger: Trigger, goal: str, strength: Strength, loop: Loop, repo: str = "") -> Ticket:
         mandate = Mandate(self.rules.version, goal, strength, trigger.actor, trigger.source, trigger.id)
         source = self.rules.sources.get(trigger.source)
         channel = source.notify if source is not None and source.notify else trigger.channel
-        ticket, created = self.store.create_ticket(goal, mandate, channel, trigger.thread)
-        if created:
-            self.start_worker(ticket)
-        return ticket
+        ticket, created = self.store.create_ticket(goal, mandate, channel, trigger.thread, loop.value, repo)
+        if not created:
+            return ticket
+        self.start_worker(ticket)
+        return self.store.get_ticket(ticket.id)
 
     def _pass_through(self, trigger: Trigger, subscribers: list[str]) -> Disposition:
         framed = frame_trigger(trigger)
@@ -270,7 +343,7 @@ class Router:
         return Disposition(Outcome.PASSED_THROUGH, "thread has a live subscriber", tuple(subscribers))
 
     def _resume_if_waiting(self, ticket: Ticket) -> None:
-        resumed = self.store.resume_waiting_ticket(ticket.id)
+        resumed = self.store.resume_waiting_ticket(ticket.id, self.max_running)
         if resumed is not None:
             self._launch(ticket, *resumed)
 
@@ -283,7 +356,18 @@ class Router:
 
 def chat_safe(text: str) -> str:
     quiet = _MENTION.sub(lambda match: match.group(0)[0] + "\u200b" + match.group(0)[1:], text)
-    return _DIRECTIVE_OPENING.sub("[ ", _ATTACHMENT_TAG.sub("media ", quiet))
+    unlinked = _LINK_JOIN.sub("] ", quiet)
+    return _IMAGE_OPENING.sub("! ", _DIRECTIVE_OPENING.sub("[ ", _ATTACHMENT_TAG.sub("media ", unlinked)))
+
+
+def strip_links(text: str) -> str:
+    """Worker text reaches chat with no image and nothing a chat app turns into a link, since a link preview fetches
+    it. A GitHub pull request or issue keeps its reference as owner/repo#N. Every other URL is removed, and so is a
+    bare host followed by a path, query or fragment. Any other host keeps its name with each dot written as [.], so
+    a file name still reads as one: README[.]md, router[.]py:12."""
+    text = _MARKDOWN_LINK.sub(r"\1", _IMAGE_TAG.sub("", text))
+    text = _URL.sub("[link removed]", _GITHUB_ITEM.sub(r"\1#\2", text))
+    return _BARE_HOST.sub(lambda match: _HOST_DOT.sub("[.]", match.group(0)), text)
 
 
 def shorten(text: str, limit: int = CHAT_WORD_LIMIT) -> str:
@@ -300,8 +384,8 @@ def _render_report(report: Report, goal: str) -> str | None:
         return None
     text = report.question if report.question else report.summary
     prefix = "Done" if report.state is ReportState.READY else report.state.value.capitalize()
-    return chat_safe(shorten(f"{prefix} {task_label(report.ticket_id, goal)}: {text}"))
+    return chat_safe(shorten(strip_links(redact(f"{prefix} {task_label(report.ticket_id, goal)}: {text}"))))
 
 
 def _render_escalation(reason: str, ticket_id: str, goal: str) -> str:
-    return chat_safe(shorten(f"Needs you {task_label(ticket_id, goal)}: {reason}"))
+    return chat_safe(shorten(strip_links(redact(f"Needs you {task_label(ticket_id, goal)}: {reason}"))))

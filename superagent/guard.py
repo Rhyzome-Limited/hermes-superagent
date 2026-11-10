@@ -15,16 +15,18 @@ TOOL_DIGEST = "superagent_digest"
 TOOL_BRIDGE_CALL = "tool_call"
 # Hermes defers plugin tools behind these bridges by default.
 TOOL_SEARCH_BRIDGES = frozenset({"tool_search", "tool_describe", TOOL_BRIDGE_CALL})
+# No memory or session_search: injected text must not persist into, or be fished out of, other sessions.
+# wiki_find and wiki_read are the read-only wiki mirror tools (toolset "wiki").
 ROUTER_ALLOWED_TOOLS = TOOL_SEARCH_BRIDGES | {
     TOOL_DISPATCH,
     TOOL_FORWARD,
     TOOL_CANCEL,
     TOOL_STATUS,
-    "memory",
-    "session_search",
     "skills_list",
     "skill_view",
     "clarify",
+    "wiki_find",
+    "wiki_read",
 }
 WATCHDOG_ALLOWED_TOOLS = TOOL_SEARCH_BRIDGES | {TOOL_TICK, TOOL_DIGEST, TOOL_STATUS, "skills_list", "skill_view"}
 WORKER_BLOCKED_TOOLS = frozenset(

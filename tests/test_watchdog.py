@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from superagent.domain import Assignment, RepairAction, Report, ReportState, TicketStatus, Trigger, Verdict
@@ -201,6 +203,27 @@ def test_varied_tool_calls_count_as_alive(router: Router, backend: FakeBackend) 
     for index in range(5):
         router.store.record_activity(assignment.id, backend.started[0][2], f"call-{index}")
     assert check_once(router)[0].verdict is Verdict.ON_TRACK
+
+
+def test_tool_calls_without_a_report_do_not_keep_a_worker_alive(router: Router, backend: FakeBackend) -> None:
+    router.ingest(REQUEST)
+    assignment = router.store.running_assignments()[0]
+    with router.store._connect() as connection:
+        connection.execute("UPDATE assignments SET started_at = ? WHERE id = ?", (time.time() - 1000, assignment.id))
+    for index in range(3):
+        router.store.record_activity(assignment.id, backend.started[0][2], f"wait-{index}")
+    result = check_once(router, policy=WatchdogPolicy(stall_after_seconds=900))[0]
+    assert result.verdict is Verdict.STUCK
+    assert "no report for" in result.reason
+
+
+def test_a_recent_report_keeps_a_long_running_worker_on_track(router: Router, backend: FakeBackend) -> None:
+    router.ingest(REQUEST)
+    assignment = router.store.running_assignments()[0]
+    with router.store._connect() as connection:
+        connection.execute("UPDATE assignments SET started_at = ? WHERE id = ?", (time.time() - 1000, assignment.id))
+    report(router, backend, "implement running, 16 min, 40 kB of output")
+    assert check_once(router, policy=WatchdogPolicy(stall_after_seconds=900))[0].verdict is Verdict.ON_TRACK
 
 
 def test_stale_worker_cannot_record_activity(router: Router, backend: FakeBackend) -> None:

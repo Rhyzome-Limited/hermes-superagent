@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from collections import Counter
 
+from .agents import redact
 from .domain import Admission, DigestItem, ReportState, TicketStatus
-from .router import chat_safe, shorten, task_label
+from .router import chat_safe, shorten, strip_links, task_label
 from .store import Store
 
 ITEMS_PER_SECTION = 5
@@ -27,6 +28,7 @@ def build_digest(store: Store, since: float, hours: float) -> str:
     escalated = store.escalations_since(since)
     waiting = [item for item in store.live_tickets() if item.status is TicketStatus.WAITING]
     running = sum(1 for item in store.live_tickets() if item.status is TicketStatus.OPEN)
+    queued = sum(1 for item in store.live_tickets() if item.status is TicketStatus.QUEUED)
     recorded = store.assessments_since(since, RECORDED_PREFIX)
     ignored = store.admission_counts_since(since, Admission.IGNORE)
     undelivered = store.undelivered_count()
@@ -40,6 +42,8 @@ def build_digest(store: Store, since: float, hours: float) -> str:
     lines += _rule_section(recorded)
     if running:
         lines.append(f"Running: {running}")
+    if queued:
+        lines.append(f"Queued: {queued}")
     if ignored:
         counts = ", ".join(f"{source} {count}" for source, count in Counter(ignored).most_common())
         lines.append(f"Ignored events: {counts}")
@@ -47,7 +51,8 @@ def build_digest(store: Store, since: float, hours: float) -> str:
         lines.append(f"Undelivered messages: {undelivered}")
     if len(lines) == 1:
         lines.append("Nothing happened.")
-    return chat_safe("\n".join(lines))
+    # Results, questions, escalation reasons and recorded goals are worker or event text: no secret, no link.
+    return chat_safe(strip_links(redact("\n".join(lines))))
 
 
 def _waiting_item(store: Store, ticket_id: str, goal: str) -> DigestItem:

@@ -50,7 +50,10 @@ SCRIPTS = {
     ],
     "route": [
         Step("terminal", {"command": "touch {work}/router-ran-{id}"}),
-        Step("superagent_dispatch", {"trigger_id": "{trigger}", "goal": "scenario=routed id=routed-worker"}),
+        Step(
+            "superagent_dispatch",
+            {"trigger_id": "{trigger}", "goal": "scenario=routed id=routed-worker", "loop": "build-loop"},
+        ),
     ],
     "routed": [
         Step("superagent_report", {"state": "progress", "summary": "started {id}"}),
@@ -72,7 +75,7 @@ SCRIPTS = {
     ],
     "stop": [
         Step("superagent_report", {"state": "progress", "summary": "started {id}"}),
-        Step("terminal", {"command": "sleep 300"}),
+        Step("terminal", {"command": "{work}/superagent-e2e-{id} 300"}),
         Step("superagent_report", {"state": "ready", "summary": "should never run {id}"}),
     ],
 }

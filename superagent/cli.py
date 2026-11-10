@@ -16,7 +16,7 @@ from .agents import ATTENTION_STATES, HOOK_SCRIPT, SessionState, settings_block
 from .brief import BriefSettings, build_brief
 from .config import DB_FILENAME
 from .digest import build_digest, send_digest
-from .domain import ReportState, Trigger
+from .domain import ReportState, ScopeClass, Trigger
 from .ledger import Item, ItemState, Ledger, LedgerError
 from .reporting import identity_from_workdir, submit_report
 from .router import Assessor
@@ -24,6 +24,7 @@ from .runtime import open_runtime, save_brief, tick
 from .watchdog import DriftJudge
 
 _WORKER_STATES = [state.value for state in ReportState]
+_SCOPE_CLASSES = [item.value for item in ScopeClass]
 
 
 def setup_parser(parser: argparse.ArgumentParser) -> None:
@@ -80,6 +81,7 @@ def setup_parser(parser: argparse.ArgumentParser) -> None:
     report.add_argument("--state", required=True, choices=_WORKER_STATES)
     report.add_argument("--summary", required=True)
     report.add_argument("--question", default="")
+    report.add_argument("--scope-class", default="", choices=["", *_SCOPE_CLASSES], help="kastle-build-loop only")
 
 
 def run(
@@ -92,7 +94,13 @@ def run(
     if args.superagent_command == "report":
         print(
             json.dumps(
-                submit_report(identity_from_workdir(Path.cwd()), ReportState(args.state), args.summary, args.question)
+                submit_report(
+                    identity_from_workdir(Path.cwd()),
+                    ReportState(args.state),
+                    args.summary,
+                    args.question,
+                    args.scope_class,
+                )
             )
         )
         return 0

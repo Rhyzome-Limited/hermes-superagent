@@ -6,7 +6,14 @@ import secrets
 from .domain import Trigger
 
 MAX_FRAMED_CHARS = 4000
-_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f​-‏‪-‮⁦-⁩]")
+# Characters that hide or reorder text: C0 and C1 controls except tab and newline (so \r and U+0085 go), soft
+# hyphen, combining grapheme joiner, Arabic letter mark, Mongolian vowel separator, zero-width and bidi marks,
+# line and paragraph separators, word joiner and invisible operators, bidi isolates, byte order mark, interlinear
+# annotation marks and the tag block.
+_CONTROL_CHARS = re.compile(
+    r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u00ad\u034f\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2064"
+    r"\u2066-\u2069\ufeff\ufff9-\ufffb\U000e0000-\U000e007f]"
+)
 
 
 def sanitize(text: str, *, keep_tail: bool = False) -> str:

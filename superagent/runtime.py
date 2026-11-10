@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import html
 import json
 import logging
 import os
@@ -13,13 +14,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from .agents import redact
 from .brief import BriefSettings, build_brief
 from .config import DB_FILENAME, WORKDIRS_DIRNAME, Config, load_config
 from .connectors import Connector, build_connector
 from .domain import Ticket
 from .ledger import Ledger
 from .polling import SourceWarning, poll_sources
-from .router import Assessor, Router, Sender, chat_safe
+from .router import Assessor, Router, Sender, chat_safe, strip_links
 from .store import Store, split_message
 from .watchdog import CheckResult, DriftJudge, check_once
 from .worker import SubprocessBackend
@@ -31,6 +33,7 @@ _TICK_LOCK_FILENAME = "tick.lock"
 IGNORED_TRIGGER_RETENTION_SECONDS = 7 * 24 * 3600.0
 POLL_BUDGET_SHARE = 0.5
 SOURCE_TICKET = "sources"
+_SEND_PLACEHOLDER = re.compile(r"\{(channel|text)\}")
 
 
 @dataclass(frozen=True)
@@ -60,8 +63,10 @@ def open_runtime(home: Path) -> Runtime:
     config = load_config(home)
     db_path = home / DB_FILENAME
     backend = SubprocessBackend(config.worker_argv, home / WORKDIRS_DIRNAME)
+    router = Router(Store(db_path), config.rules, backend, config.max_running)
+    backend.on_exit = router.start_queued
     connectors = {spec.name: build_connector(spec) for spec in config.connectors}
-    return Runtime(home, config, Router(Store(db_path), config.rules, backend), Ledger(db_path), connectors)
+    return Runtime(home, config, router, Ledger(db_path), connectors)
 
 
 def argv_sender(argv: tuple[str, ...]) -> Sender | None:
@@ -69,7 +74,11 @@ def argv_sender(argv: tuple[str, ...]) -> Sender | None:
         return None
 
     def send(channel: str, text: str) -> None:
-        rendered = [part.replace("{channel}", channel).replace("{text}", text) for part in argv]
+        # The one place every outbound text passes, so it is neutralised here whatever wrote the outbox row: no
+        # secret, nothing a chat app turns into a link or an attachment. `hermes send` sends any text with a tag as
+        # Telegram HTML, where <a href> hides a link and &#46; is a dot, so &, < and > are escaped last (A7).
+        values = {"channel": channel, "text": html.escape(chat_safe(strip_links(redact(text))), quote=False)}
+        rendered = [_SEND_PLACEHOLDER.sub(lambda match: values[match.group(1)], part) for part in argv]
         subprocess.run(rendered, check=True, timeout=_SEND_TIMEOUT_SECONDS, capture_output=True)
 
     return send

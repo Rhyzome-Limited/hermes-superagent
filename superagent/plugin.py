@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import pwd
 import time
 import uuid
 from collections.abc import Callable, Mapping
@@ -11,8 +13,8 @@ from typing import Any
 from .cli import run, setup_parser
 from .config import load_config
 from .digest import DigestError, build_digest, send_digest
-from .domain import ReportState, Trigger
-from .framing import frame_trigger
+from .domain import Loop, ReportState, ScopeClass, Trigger
+from .framing import frame_trigger, frame_untrusted
 from .guard import (
     TOOL_CANCEL,
     TOOL_DIGEST,
@@ -28,7 +30,7 @@ from .reporting import NotAWorkerError, WorkerIdentity, identity_from_workdir, r
 from .router import NotAdmittedError, Outcome
 from .runtime import Runtime, open_runtime, tick
 from .store import StaleAssignmentError, Store
-from .worker import IDENTITY_FILENAME, ROLE_ROUTER, ROLE_WATCHDOG, ROLE_WORKER, WorkerStopError
+from .worker import ROLE_ROUTER, ROLE_WATCHDOG, ROLE_WORKER, WorkerStopError
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,9 @@ PLUGIN_NAME = "hermes-superagent"
 TOOLSET = "superagent"
 ADMITTED_MAX_AGE_SECONDS = 600.0
 WEBHOOK_SOURCE_PREFIX = "webhook:"
+# The platform Hermes 0.22.7 gives pre_llm_call for a classic CLI turn (`hermes chat`, also `-q`), with no sender.
+# The TUI ("tui") and desktop ("desktop") surfaces are not taken.
+CLI_SOURCE = "cli"
 
 ROUTER_PROMPT = (
     "You are the router of a super-agent. You talk to people on every channel, dispatch work and answer on "
@@ -62,8 +67,16 @@ DISPATCH_SCHEMA = {
         "properties": {
             "trigger_id": {"type": "string", "description": "Id of the admitted trigger."},
             "goal": {"type": "string", "description": "One clear paragraph describing the task and its limits."},
+            "loop": {
+                "type": "string",
+                "enum": [loop.value for loop in Loop],
+                "description": "The one loop the worker runs: kastle-build-loop for kastle-mobile or kastle work "
+                "(forced in code for those repos and CMPY tickets), build-loop for a manifest or a ticket queue, "
+                "claude-assisted-loop to build or implement in any other repo. If unsure, ask instead of dispatching.",
+            },
+            "repo": {"type": "string", "description": "Repository the task is in, such as owner/name, if known."},
         },
-        "required": ["trigger_id", "goal"],
+        "required": ["trigger_id", "goal", "loop"],
     },
 }
 FORWARD_SCHEMA = {
@@ -115,6 +128,11 @@ REPORT_SCHEMA = {
             "state": {"type": "string", "enum": [state.value for state in ReportState]},
             "summary": {"type": "string", "description": "One or two factual sentences."},
             "question": {"type": "string", "description": "With blocked: the one decision a person must make."},
+            "scope_class": {
+                "type": "string",
+                "enum": [item.value for item in ScopeClass],
+                "description": "kastle-build-loop only: the Phase 0 scope triage. Once leo-gated, it never changes.",
+            },
         },
         "required": ["state", "summary"],
     },
@@ -132,14 +150,8 @@ class Plugin:
 
     @property
     def role(self) -> str:
-        configured = str(self.ctx.get_config("role", default="") or "")
-        if configured or not self._session_is_in_a_worker_directory():
-            return configured
-        return ROLE_WORKER
-
-    def _session_is_in_a_worker_directory(self) -> bool:
-        cwd = self.ctx.session_cwd()
-        return bool(cwd) and (Path(cwd) / IDENTITY_FILENAME).is_file()
+        """Only the profile's own setting gives a role. A worker directory never turns a session into a worker."""
+        return str(self.ctx.get_config("role", default="") or "")
 
     def home(self) -> Path:
         configured = self.ctx.get_config("home", default="")
@@ -188,6 +200,8 @@ class Plugin:
             return None
         try:
             trigger = trigger_from_event(event)
+            if trigger.source == CLI_SOURCE:
+                return {"action": "skip", "reason": "superagent: the cli source only takes Hermes CLI turns"}
             router = self.runtime().router
             if trigger.source.startswith(WEBHOOK_SOURCE_PREFIX):
                 source_rules = router.rules.sources.get(trigger.source)
@@ -212,13 +226,20 @@ class Plugin:
         if self.role != ROLE_ROUTER:
             return None
         sender = str(sender_id or "")
-        if platform == "webhook" and sender.startswith(WEBHOOK_SOURCE_PREFIX):
+        text = _message_text(user_message)
+        runtime = self.runtime()
+        if platform == CLI_SOURCE:
+            # A classic in-process turn has no sender. A local turn that a Hermes 0.22.7 gateway serves carries
+            # uid:<n>, which the gateway takes from the control socket's peer credentials, never from the text.
+            if sender and sender != f"uid:{os.getuid()}":
+                return None
+            source, actor = CLI_SOURCE, os_user()
+            admit_cli_turn(runtime, str(kwargs.get("session_id") or ""), actor, text)
+        elif platform == "webhook" and sender.startswith(WEBHOOK_SOURCE_PREFIX):
             source, actor = sender, None
         else:
             source, actor = platform, sender
-        admitted = self.runtime().store.take_admitted(
-            source, actor, _message_text(user_message), ADMITTED_MAX_AGE_SECONDS
-        )
+        admitted = runtime.store.take_admitted(source, actor, text, ADMITTED_MAX_AGE_SECONDS)
         if not admitted:
             return None
         lines = [f"trigger_id={trigger.id}\n{frame_trigger(trigger)}" for trigger in admitted]
@@ -231,13 +252,18 @@ class Plugin:
         if self.role != ROLE_ROUTER:
             return _error("superagent_dispatch only works in the router")
         try:
-            ticket = self.runtime().router.dispatch(str(args.get("trigger_id", "")), str(args.get("goal", "")))
-        except NotAdmittedError as error:
+            ticket = self.runtime().router.dispatch(
+                str(args.get("trigger_id", "")),
+                str(args.get("goal", "")),
+                str(args.get("loop") or ""),
+                str(args.get("repo") or ""),
+            )
+        except (NotAdmittedError, ValueError) as error:
             return _error(str(error))
         except Exception as error:
             logger.exception("dispatch failed")
             return _error(f"dispatch failed: {error}")
-        return json.dumps({"ticket": ticket.id, "status": ticket.status.value})
+        return json.dumps({"ticket": ticket.id, "status": ticket.status.value, "loop": ticket.loop})
 
     def forward_tool(self, args: Mapping[str, Any], **kwargs: Any) -> str:
         if self.role != ROLE_ROUTER:
@@ -282,18 +308,27 @@ class Plugin:
         return json.dumps({"digest": text, "sent": bool(args.get("send"))})
 
     def status_tool(self, args: Mapping[str, Any], **kwargs: Any) -> str:
+        if self.role not in (ROLE_ROUTER, ROLE_WATCHDOG):
+            return _error("superagent_status only works in the router or the watchdog")
         try:
             runtime = self.runtime()
-            return json.dumps({"tickets": runtime.router.status(), "undelivered": runtime.store.undelivered_count()})
+            tickets = [_framed_status(line) for line in runtime.router.status()]
+            return json.dumps({"tickets": tickets, "undelivered": runtime.store.undelivered_count()})
         except Exception as error:
             logger.exception("status failed")
             return _error(f"status failed: {error}")
 
     def report_tool(self, args: Mapping[str, Any], **kwargs: Any) -> str:
+        if self.role != ROLE_WORKER:
+            return _error("superagent_report only works in the worker")
         try:
             state = ReportState(str(args.get("state", "")))
             result = submit_report(
-                self.worker_identity(), state, str(args.get("summary", "")), str(args.get("question", ""))
+                self.worker_identity(),
+                state,
+                str(args.get("summary", "")),
+                str(args.get("question", "")),
+                str(args.get("scope_class") or ""),
             )
         except StaleAssignmentError as error:
             return _error(f"{error}. This assignment has been replaced: stop working now.")
@@ -333,6 +368,29 @@ class Plugin:
             judge=LlmDriftJudge(self.ctx.llm),
             assessor=LlmAssessor(self.ctx.llm),
         )
+
+
+def os_user() -> str:
+    """The account running this process, from the OS rather than the environment, which a caller controls."""
+    return pwd.getpwuid(os.getuid()).pw_name
+
+
+def admit_cli_turn(runtime: Runtime, session_id: str, actor: str, text: str) -> None:
+    """A router chat in the Hermes CLI has no gateway, so its turn goes through the gate here as trigger
+    cli:<session>:<n> from the OS user. Off unless [sources.cli] exists; judged on source and actor, never text."""
+    if CLI_SOURCE not in runtime.router.rules.sources or not text.strip():
+        return
+    prefix = f"{CLI_SOURCE}:{session_id or 'no-session'}:"
+    trigger = Trigger(
+        id=f"{prefix}{runtime.store.next_trigger_number(prefix)}",
+        source=CLI_SOURCE,
+        thread="",
+        actor=actor,
+        text=text,
+        channel="",
+        addressed=True,
+    )
+    runtime.router.ingest(trigger, auto_dispatch=False)
 
 
 def _terminal_backend() -> str:
@@ -411,6 +469,15 @@ def _message_text(message: object) -> str:
         parts = [part.get("text", "") for part in message if isinstance(part, dict)]
         return "\n".join(str(part) for part in parts)
     return ""
+
+
+def _framed_status(line: Mapping[str, str]) -> dict[str, str]:
+    """Goals can be raw event text and questions are worker-written: both reach the model as framed data."""
+    framed = dict(line)
+    framed["goal"] = frame_untrusted(f"goal of {line['ticket']}", line["goal"])
+    if line["question"]:
+        framed["question"] = frame_untrusted(f"question from the worker on {line['ticket']}", line["question"])
+    return framed
 
 
 def _error(message: str) -> str:
