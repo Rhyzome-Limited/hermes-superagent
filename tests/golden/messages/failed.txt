@@ -1,0 +1,4 @@
+❌ Failed · marIA export fix · tk-5e6f7a8b
+The export test still fails for dates before 1970.
+It tried two fixes. Both broke the import test.
+You: decide if dates before 1970 are in scope.

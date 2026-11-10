@@ -102,6 +102,9 @@ class Ticket:
     loop: str = ""
     repo: str = ""
     scope_class: str = ""
+    title: str = ""
+    done_when: str = ""
+    created_at: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -115,6 +118,26 @@ class Assignment:
 
 
 @dataclass(frozen=True)
+class Check:
+    name: str
+    passed: bool
+
+
+@dataclass(frozen=True)
+class ReportFields:
+    """Report schema v2 (tuning plan A.1). Every field but lessons and details can reach chat."""
+
+    outcome: str = ""
+    changes: tuple[str, ...] = ()
+    checks: tuple[Check, ...] = ()
+    links: tuple[str, ...] = ()
+    next_for_leo: str = ""
+    topic: str = ""
+    lessons: tuple[str, ...] = ()
+    details: str = ""
+
+
+@dataclass(frozen=True)
 class Report:
     assignment_id: str
     ticket_id: str
@@ -122,6 +145,9 @@ class Report:
     summary: str
     question: str
     at: float
+    # None for a report stored before schema v2: its free summary is all there is.
+    fields: ReportFields | None = None
+    style_fail: bool = False
 
 
 @dataclass(frozen=True)

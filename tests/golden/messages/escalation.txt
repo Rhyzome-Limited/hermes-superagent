@@ -1,0 +1,4 @@
+🚨 Stuck · Guards CI fix · tk-ee69ce72
+The worker sent no report for 25 minutes.
+The watchdog restarted it once. It is silent again.
+You: check it, or send "cancel tk-ee69ce72".

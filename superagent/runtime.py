@@ -84,6 +84,10 @@ def argv_sender(argv: tuple[str, ...]) -> Sender | None:
     return send
 
 
+def relay_channel(runtime: Runtime, channel: str) -> list[tuple[str, str, str]]:
+    return runtime.router.relay(argv_sender(runtime.config.send_argv), only_channel=channel)
+
+
 def tick(runtime: Runtime, judge: DriftJudge | None = None, assessor: Assessor | None = None) -> TickResult:
     lock_fd = os.open(runtime.home / _TICK_LOCK_FILENAME, os.O_CREAT | os.O_RDWR, 0o600)
     try:
@@ -153,7 +157,7 @@ def _alert_at_once(runtime: Runtime, errors: list[str]) -> None:
     try:
         queued = [runtime.store.raise_alert_now(_alert_key(error), chat_safe(error), channel) for error in errors]
         if any(queued):
-            runtime.router.relay(argv_sender(runtime.config.send_argv), only_channel=channel)
+            relay_channel(runtime, channel)
     except Exception:
         logger.exception("could not raise an alert at once")
 
@@ -251,4 +255,4 @@ def _raise_alerts(runtime: Runtime, errors: list[str], warnings: list[SourceWarn
     raised, resolved = runtime.store.sync_alerts(active, runtime.config.alert_after_seconds, channel, immediate)
     if not (raised or resolved):
         return []
-    return runtime.router.relay(argv_sender(runtime.config.send_argv), only_channel=channel)
+    return relay_channel(runtime, channel)

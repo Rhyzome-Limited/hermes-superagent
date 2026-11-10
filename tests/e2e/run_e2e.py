@@ -420,7 +420,7 @@ def stage_router(work: Path, log: Path) -> None:
             line.startswith("webhook:") and "done routed-worker" in line for line in delivered.splitlines()
         )
         check("watchdog: the relay goes back to the webhook chat", back_to_chat, delivered)
-        check("github: the result goes to the team channel", "discord:team\tDone [" in delivered, delivered)
+        check("github: the result goes to the team channel", "discord:team\t✅ Done · " in delivered, delivered)
         check("relay: messages name their task", "· tk-" in delivered and "]: done gh-worker" in delivered, delivered)
         config_path = home / "superagent.toml"
         good = config_path.read_text(encoding="utf-8")
@@ -482,7 +482,7 @@ def scenario_cancel(runtime: Runtime, log: Path, work: Path, sent: Path) -> None
     check("cancel: the worker's late report is never stored", "late lingering" not in summaries, summaries)
     hermes("-p", "watchdog", "superagent", "tick")
     delivered = sent.read_text(encoding="utf-8") if sent.exists() else ""
-    check("cancel: the person is told", "Cancelled [" in delivered, delivered[-400:])
+    check("cancel: the person is told", "⏹️ Cancelled · " in delivered, delivered[-400:])
 
 
 def scenario_digest(sent: Path) -> None:

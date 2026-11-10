@@ -179,11 +179,20 @@ def test_dispatch_tool_requires_a_loop_from_the_fixed_list(tmp_path: Path) -> No
     assert inbound(ctx, text="fix the send screen in kastle-mobile") is None
     offered(ctx, "fix the send screen in kastle-mobile")
     dispatch = ctx.tools["superagent_dispatch"]["handler"]
-    missing = json.loads(dispatch({"trigger_id": "discord:c1:1", "goal": "Fix the kastle-mobile send screen"}))
+    missing = json.loads(
+        dispatch(
+            {"trigger_id": "discord:c1:1", "goal": "Fix the kastle-mobile send screen", "title": "Send screen fix"}
+        )
+    )
     assert "loop must be one of" in missing["error"]
     answer = json.loads(
         dispatch(
-            {"trigger_id": "discord:c1:1", "goal": "Fix the kastle-mobile send screen", "loop": "claude-assisted-loop"}
+            {
+                "trigger_id": "discord:c1:1",
+                "goal": "Fix the kastle-mobile send screen",
+                "loop": "claude-assisted-loop",
+                "title": "Send screen fix",
+            }
         )
     )
     assert answer["loop"] == "kastle-build-loop"
