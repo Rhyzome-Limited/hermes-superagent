@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from superagent import style
 from superagent.judges import rewrite_reply
 from superagent.plugin import ROUTER_PROMPT
@@ -21,7 +23,21 @@ REAL_REPLY = (
     "- Ask for status and I list open tickets.\n\n"
     'Code sends the Started, Done, Needs you and Failed messages. Try: "add a README line to superagent-sandbox".'
 )
-PLAIN = "I start workers and pass on their reports. I never run code myself.\nSend me a task with its repo and gate."
+PLAIN = (
+    "I start workers and pass on their reports. I never run code myself.\n"
+    "Send me a task with its repo and gate.\n"
+    'Try: "add a README line to superagent-sandbox".'
+)
+# Ticket ids, PR numbers, backticked commands and quoted replies are what Leo acts on, so a rewrite keeps them exactly.
+PARKED = (
+    "The plan for tk-1a2b3c4d is in PR #12, and it changes `ops/retry.py`, which tk-5e6f7a8b also touches, "
+    'so reply "approve tk-1a2b3c4d" or say what to change.'
+)
+PARKED_REWRITE = (
+    "The plan for tk-1a2b3c4d is in PR #12.\n"
+    "It changes `ops/retry.py`, which tk-5e6f7a8b also touches.\n"
+    'Reply "approve tk-1a2b3c4d" or say what to change.'
+)
 
 
 @dataclass
@@ -64,6 +80,27 @@ def test_a_plain_reply_is_left_alone() -> None:
 def test_a_rewrite_that_still_breaks_a_rule_keeps_the_original() -> None:
     assert rewrite_reply(RecordingLlm({"reply": REAL_REPLY}), REAL_REPLY) is None
     assert rewrite_reply(RecordingLlm({"wrong": "shape"}), REAL_REPLY) is None
+
+
+def test_a_rewrite_that_keeps_what_leo_acts_on_is_used() -> None:
+    assert style.check_message(PARKED) and not style.check_message(PARKED_REWRITE)
+    assert rewrite_reply(RecordingLlm({"reply": PARKED_REWRITE}), PARKED) == PARKED_REWRITE
+
+
+def test_a_rewrite_that_drops_the_approve_command_keeps_the_original() -> None:
+    dropped = PARKED_REWRITE.replace('Reply "approve tk-1a2b3c4d"', "Approve it")
+    assert not style.check_message(dropped)
+    assert rewrite_reply(RecordingLlm({"reply": dropped}), PARKED) is None
+
+
+@pytest.mark.parametrize(
+    ("kept", "changed"),
+    [("tk-5e6f7a8b", "another ticket"), ("PR #12", "the PR"), ("`ops/retry.py`", "ops/retry.py")],
+)
+def test_a_rewrite_that_changes_a_ticket_id_pr_number_or_command_keeps_the_original(kept: str, changed: str) -> None:
+    rewrite = PARKED_REWRITE.replace(kept, changed)
+    assert not style.check_message(rewrite)
+    assert rewrite_reply(RecordingLlm({"reply": rewrite}), PARKED) is None
 
 
 def test_a_failing_model_keeps_the_original() -> None:
